@@ -20,11 +20,24 @@ BUSINESS_DAYS = {0, 1, 2, 3, 4, 5}  # Monday=0 to Saturday=5 (Sunday=6 excluded)
 
 
 def _get_credentials() -> Credentials | None:
+    import base64, json as _json
     settings = get_settings()
     token_path = os.path.join(settings.credentials_dir, "token.json")
     creds = None
 
-    if os.path.exists(token_path):
+    # Priority 1: GOOGLE_TOKEN_JSON env var (base64-encoded) — used in production
+    token_b64 = os.environ.get("GOOGLE_TOKEN_JSON")
+    if token_b64:
+        try:
+            token_data = base64.b64decode(token_b64).decode()
+            creds = Credentials.from_authorized_user_info(
+                _json.loads(token_data), SCOPES
+            )
+        except Exception as e:
+            logger.error(f"Error loading token from env var: {e}")
+
+    # Priority 2: token.json file — used in local development
+    if not creds and os.path.exists(token_path):
         creds = Credentials.from_authorized_user_file(token_path, SCOPES)
 
     if creds and creds.expired and creds.refresh_token:

@@ -1,6 +1,7 @@
 .env
 credentials/token.json
 credentials/service_account.json
+credentials/*.json
 data/conversations/
 __pycache__/
 *.pyc
