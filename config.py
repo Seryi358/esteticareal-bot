@@ -17,6 +17,7 @@ class Settings(BaseSettings):
 
     # Google Calendar
     google_calendar_id: str = "primary"
+    google_token_json: str = ""  # base64-encoded token.json for production
 
     # Paths
     conversations_dir: str = "data/conversations"
