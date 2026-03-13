@@ -1,0 +1,13 @@
+.env
+credentials/token.json
+credentials/service_account.json
+data/conversations/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+venv/
+.venv/
+*.egg-info/
+dist/
+build/
