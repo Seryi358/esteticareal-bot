@@ -88,7 +88,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     # -----------------------------------------------------------------------
     # Incoming message from a client
     # -----------------------------------------------------------------------
-    push_name: str | None = data.get("pushName") or data.get("notifyName")
+    push_name: str | None = data.get("pushName") or data.get("notifyName") or None
+    logger.info(f"Incoming message from {phone} | pushName={push_name!r} | type={list(message_obj.keys())}")
     message_type, text_content, media_key_id, media_base64_inline = _parse_message(
         key, message_obj
     )

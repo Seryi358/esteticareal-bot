@@ -508,7 +508,23 @@ async def _generate_reply(conv: ConversationState) -> str:
 
     system_with_context = header + "\n" + SYSTEM_PROMPT
 
+    logger.info(f"[{conv.phone}] Generating reply — name={conv.user_display_name!r}, phase={conv.phase}")
     messages = [{"role": "system", "content": system_with_context}] + conv.messages
+
+    # Inject a final system reminder about the name right before GPT generates
+    # (recency bias ensures GPT pays attention to this)
+    name = conv.user_display_name
+    if name:
+        messages.append({
+            "role": "system",
+            "content": f"RECORDATORIO: El usuario se llama {name}. Usa su nombre en tu respuesta."
+        })
+    else:
+        messages.append({
+            "role": "system",
+            "content": "RECORDATORIO: No sabes el nombre del usuario. Usa 'amor' o 'chica' y pregunta cómo se llama."
+        })
+
     return await ai.chat(messages)
 
 
