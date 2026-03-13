@@ -1,3 +1,5 @@
+import base64
+import io
 import json
 import logging
 from openai import AsyncOpenAI
@@ -76,6 +78,31 @@ async def analyze_image(base64_image: str) -> dict:
             "description": "Error al procesar imagen",
             "response_suggestion": "Pide al usuario que reenvie la imagen",
         }
+
+
+async def transcribe_audio(base64_audio: str) -> str | None:
+    """
+    Transcribe a WhatsApp voice/audio message using OpenAI Whisper.
+    base64_audio: base64-encoded OGG/MP4/MP3 audio data.
+    Returns transcribed text in Spanish, or None on failure.
+    """
+    try:
+        audio_bytes = base64.b64decode(base64_audio)
+        # WhatsApp audios are typically OGG/Opus — Whisper handles this
+        audio_file = io.BytesIO(audio_bytes)
+        audio_file.name = "audio.ogg"
+
+        transcription = await get_client().audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_file,
+            language="es",
+        )
+        text = transcription.text.strip()
+        logger.info(f"Audio transcribed: {text[:80]}...")
+        return text
+    except Exception as e:
+        logger.error(f"Audio transcription error: {e}")
+        return None
 
 
 async def extract_user_data(messages: list[dict]) -> dict:

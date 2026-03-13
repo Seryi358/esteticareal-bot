@@ -5,6 +5,11 @@ from config import get_settings
 
 logger = logging.getLogger(__name__)
 
+# Track IDs of messages sent BY the bot so we can distinguish them
+# from messages Yesica types manually (both have fromMe=true)
+_bot_sent_ids: set[str] = set()
+_MAX_SENT_IDS = 5000  # prevent unbounded growth
+
 
 def _headers() -> dict:
     return {
@@ -14,8 +19,7 @@ def _headers() -> dict:
 
 
 def _base_url() -> str:
-    s = get_settings()
-    return s.evolution_api_url.rstrip("/")
+    return get_settings().evolution_api_url.rstrip("/")
 
 
 def _instance() -> str:
@@ -24,21 +28,33 @@ def _instance() -> str:
 
 
 async def send_text_message(phone: str, text: str) -> bool:
-    """Send a WhatsApp text message via Evolution API."""
+    """Send a WhatsApp text message via Evolution API. Tracks the sent message ID."""
     url = f"{_base_url()}/message/sendText/{_instance()}"
     payload = {
         "number": phone,
         "text": text,
-        "delay": 1200,  # typing simulation delay in ms
+        "delay": 1200,
     }
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(url, json=payload, headers=_headers())
             response.raise_for_status()
+            data = response.json()
+            # Store the message ID so we can identify bot-sent messages in webhooks
+            msg_id = data.get("key", {}).get("id")
+            if msg_id:
+                _bot_sent_ids.add(msg_id)
+                if len(_bot_sent_ids) > _MAX_SENT_IDS:
+                    _bot_sent_ids.clear()
             return True
     except Exception as e:
         logger.error(f"Error sending message to {phone}: {e}")
         return False
+
+
+def is_bot_sent_message(message_id: str) -> bool:
+    """Returns True if this message ID was sent by the bot (not typed by Yesica)."""
+    return message_id in _bot_sent_ids
 
 
 async def send_typing_presence(phone: str) -> None:
@@ -52,11 +68,11 @@ async def send_typing_presence(phone: str) -> None:
         async with httpx.AsyncClient(timeout=10) as client:
             await client.post(url, json=payload, headers=_headers())
     except Exception:
-        pass  # Non-critical, ignore errors
+        pass
 
 
 async def get_media_base64(message_key_id: str) -> str | None:
-    """Download and return base64 of a media message (e.g. payment screenshot)."""
+    """Download and return base64 of a media message."""
     url = f"{_base_url()}/chat/getBase64FromMediaMessage/{_instance()}"
     payload = {"message": {"key": {"id": message_key_id}}}
     try:

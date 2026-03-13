@@ -39,6 +39,21 @@ async def process_message(
     if push_name:
         _pending_names[phone] = push_name
 
+    # Check human takeover — if Yesica is handling this, bot stays silent
+    conv = load_conversation(phone)
+    if conv.human_takeover:
+        logger.info(f"Human takeover active for {phone} — bot silent")
+        return
+
+    # Audio — transcribe first, then treat as text (no debounce needed for audio)
+    if message_type == "audioMessage":
+        conv = load_conversation(phone)
+        if push_name and not conv.user_display_name:
+            conv.user_display_name = push_name
+        await _handle_audio(conv, media_key_id, media_base64_inline)
+        save_conversation(conv)
+        return
+
     # Images are processed immediately (no debounce)
     if message_type == "imageMessage":
         conv = load_conversation(phone)
@@ -88,6 +103,47 @@ async def _fire_after_delay(phone: str, delay: float) -> None:
 
     await _handle_text(conv, combined)
     save_conversation(conv)
+
+
+# ---------------------------------------------------------------------------
+# Audio handling
+# ---------------------------------------------------------------------------
+
+async def _handle_audio(
+    conv: ConversationState,
+    media_key_id: str | None,
+    media_base64_inline: str | None,
+) -> None:
+    """Transcribe audio with Whisper and process as text."""
+    await evolution.send_typing_presence(conv.phone)
+
+    base64_data = media_base64_inline
+    if not base64_data and media_key_id:
+        base64_data = await evolution.get_media_base64(media_key_id)
+
+    if not base64_data:
+        conv.add_message("user", "[El usuario envio un audio pero no se pudo descargar]")
+        conv.inject_system_event(
+            "INSTRUCCION: El usuario envio un audio pero no se pudo procesar. "
+            "Pidele amablemente que lo reenvie o que escriba su mensaje."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
+        return
+
+    transcription = await ai.transcribe_audio(base64_data)
+
+    if transcription:
+        logger.info(f"Audio from {conv.phone} transcribed: {transcription[:60]}")
+        # Process the transcribed text as a normal message
+        await _handle_text(conv, transcription)
+    else:
+        conv.inject_system_event(
+            "INSTRUCCION: El usuario envio un audio pero no se pudo transcribir. "
+            "Pidele amablemente que escriba su mensaje."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
 
 
 # ---------------------------------------------------------------------------

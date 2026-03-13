@@ -19,6 +19,7 @@ class ConversationState:
     collected_email: Optional[str] = None
     calendar_slots_json: Optional[str] = None  # JSON string of available slots
     appointment_datetime: Optional[str] = None
+    human_takeover: bool = False  # True when Yesica has manually taken over
     messages: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
