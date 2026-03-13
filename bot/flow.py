@@ -13,6 +13,15 @@ from services import ai, calendar, evolution
 logger = logging.getLogger(__name__)
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
+# ---------------------------------------------------------------------------
+# Debounce — accumulate rapid messages before processing
+# ---------------------------------------------------------------------------
+DEBOUNCE_SECONDS = 3.0
+
+_pending_text: dict[str, list[str]] = {}
+_pending_names: dict[str, str] = {}
+_debounce_tasks: dict[str, asyncio.Task] = {}
+
 
 # ---------------------------------------------------------------------------
 # Public entry point
@@ -24,24 +33,60 @@ async def process_message(
     message_type: str,
     text_content: str | None,
     media_key_id: str | None,
-    media_base64_inline: str | None,  # Some Evolution setups send base64 in webhook
+    media_base64_inline: str | None,
 ) -> None:
     """Main handler called from the webhook endpoint."""
-    conv = load_conversation(phone)
+    if push_name:
+        _pending_names[phone] = push_name
 
-    # Update display name if we got one
+    # Images are processed immediately (no debounce)
+    if message_type == "imageMessage":
+        conv = load_conversation(phone)
+        if push_name and not conv.user_display_name:
+            conv.user_display_name = push_name
+        await _handle_image(conv, media_key_id, media_base64_inline)
+        save_conversation(conv)
+        return
+
+    # Text messages go through debounce
+    text = text_content or ""
+    if not text.strip():
+        return
+
+    if phone not in _pending_text:
+        _pending_text[phone] = []
+    _pending_text[phone].append(text)
+
+    # Cancel existing debounce timer
+    existing = _debounce_tasks.get(phone)
+    if existing and not existing.done():
+        existing.cancel()
+
+    # Schedule processing after delay
+    _debounce_tasks[phone] = asyncio.create_task(
+        _fire_after_delay(phone, DEBOUNCE_SECONDS)
+    )
+
+
+async def _fire_after_delay(phone: str, delay: float) -> None:
+    """Wait, then process all accumulated messages for this user."""
+    await asyncio.sleep(delay)
+
+    messages = _pending_text.pop(phone, [])
+    push_name = _pending_names.pop(phone, None)
+    _debounce_tasks.pop(phone, None)
+
+    if not messages:
+        return
+
+    # Combine multiple messages into one coherent input
+    combined = " ".join(messages)
+
+    conv = load_conversation(phone)
     if push_name and not conv.user_display_name:
         conv.user_display_name = push_name
 
-    # Route based on message type
-    if message_type == "imageMessage":
-        await _handle_image(conv, media_key_id, media_base64_inline)
-    else:
-        content = text_content or ""
-        if not content.strip():
-            return  # Ignore empty messages
-        await _handle_text(conv, content)
-
+    await _handle_text(conv, combined)
     save_conversation(conv)
 
 
@@ -54,16 +99,6 @@ async def _handle_image(
     media_key_id: str | None,
     media_base64_inline: str | None,
 ) -> None:
-    if conv.phase != "awaiting_screenshot":
-        # Not expecting an image right now
-        conv.inject_system_event(
-            "INSTRUCCION_INTERNA: El usuario envio una imagen pero no estabamos esperando un comprobante. "
-            "Responde de forma natural y amigable, preguntale si quiso enviarte algo especifico."
-        )
-        reply = await _generate_reply(conv)
-        await _send_and_record(conv, reply)
-        return
-
     # Get base64 of the image
     base64_data = media_base64_inline
     if not base64_data and media_key_id:
@@ -72,48 +107,95 @@ async def _handle_image(
 
     if not base64_data:
         conv.inject_system_event(
-            "PAYMENT_UNCLEAR: No se pudo descargar la imagen. Pide al usuario que la envie de nuevo."
+            "IMAGE_ANALYSIS: No se pudo descargar la imagen. Pide al usuario que la envie de nuevo."
         )
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
 
-    # Verify payment with GPT-4o Vision
+    # Analyze the image with GPT-4o Vision
     await evolution.send_typing_presence(conv.phone)
-    result = await ai.verify_payment_image(base64_data)
+    analysis = await ai.analyze_image(base64_data)
 
-    is_valid = (
-        result.get("is_valid")
-        and result.get("appears_authentic")
-    )
+    image_type = analysis.get("image_type", "OTHER")
+    description = analysis.get("description", "")
+    suggestion = analysis.get("response_suggestion", "")
 
-    if is_valid:
-        conv.phase = "collecting_data"
-        conv.payment_verified = True
-        conv.inject_system_event(
-            f"PAYMENT_VERIFIED: Comprobante verificado exitosamente. "
-            f"Monto detectado: {result.get('amount_detected', '$25.000')}. "
-            f"Ahora pide el nombre completo y celular del usuario para agendar la valoracion."
+    # Handle payment screenshots
+    if image_type == "PAYMENT" and conv.phase == "awaiting_screenshot":
+        is_valid = (
+            analysis.get("payment_appears_authentic")
+            and analysis.get("payment_recipient_matches")
         )
-        # Notify Yesica (once)
-        if not conv.notification_sent:
-            asyncio.create_task(
-                _notify_yesica(conv.phone, conv.user_display_name)
+
+        if is_valid:
+            conv.phase = "collecting_data"
+            conv.payment_verified = True
+            conv.inject_system_event(
+                f"PAYMENT_VERIFIED: Comprobante verificado exitosamente. "
+                f"Monto detectado: {analysis.get('payment_amount', '$25.000')}. "
+                f"Ahora pide el nombre completo y celular del usuario para agendar."
             )
-            conv.notification_sent = True
-    elif not result.get("appears_authentic"):
+            if not conv.notification_sent:
+                asyncio.create_task(_notify_yesica(conv))
+                conv.notification_sent = True
+
+        elif not analysis.get("payment_appears_authentic"):
+            conv.inject_system_event(
+                f"PAYMENT_INVALID: El comprobante parece no ser autentico. "
+                f"Con mucho tacto pide que contacte a Yesica al 3006278237."
+            )
+        else:
+            conv.inject_system_event(
+                f"PAYMENT_UNCLEAR: No se pudo verificar el comprobante. "
+                f"Razon: {description}. Pide que lo reenvie con mejor calidad, "
+                f"asegurandose de que se vea el numero destino, monto y fecha."
+            )
+
+    elif image_type == "PAYMENT" and conv.phase != "awaiting_screenshot":
+        # Payment screenshot but not expected — could be trying to pay
         conv.inject_system_event(
-            f"PAYMENT_INVALID: El comprobante parece no ser autentico o fue editado. "
-            f"Notas: {result.get('notes', '')}. "
-            f"Con mucho tacto y sin acusar al usuario, pidele que se contacte directamente con Yesica "
-            f"al 3006278237 para resolver cualquier inconveniente."
+            f"IMAGE_ANALYSIS: El usuario envio lo que parece ser un comprobante de pago "
+            f"({description}), pero todavia no habiamos llegado al paso del pago. "
+            f"Reacciona de forma natural: si ya mencionaste el Nequi, verifica el pago; "
+            f"si no, explica el proceso amablemente."
         )
+
+    elif image_type == "BODY":
+        zone = analysis.get("body_zone", "corporal")
+        conv.inject_system_event(
+            f"IMAGE_ANALYSIS: El usuario envio una foto de su zona {zone}. "
+            f"Descripcion: {description}. "
+            f"Sugerencia: {suggestion}. "
+            f"Responde con empatia genuina, muestra interes profesional por su caso, "
+            f"menciona que Yesica podria hacer una valoracion personalizada de esa zona "
+            f"y conecta con los tratamientos relevantes para esa zona corporal."
+        )
+
+    elif image_type == "FACE":
+        conv.inject_system_event(
+            f"IMAGE_ANALYSIS: El usuario envio una foto de su rostro o piel. "
+            f"Descripcion: {description}. "
+            f"Sugerencia: {suggestion}. "
+            f"Responde con empatia, muestra interes profesional, menciona el hidrofacial "
+            f"o tratamientos faciales segun lo que ves, y ofrece la valoracion facial con Yesica."
+        )
+
+    elif image_type == "BEFORE_AFTER":
+        conv.inject_system_event(
+            f"IMAGE_ANALYSIS: El usuario envio una foto de antes/despues o resultados. "
+            f"Descripcion: {description}. "
+            f"Sugerencia: {suggestion}. "
+            f"Celebra con entusiasmo, valida que esos resultados son posibles, "
+            f"usa esto como motivacion para que continue su proceso."
+        )
+
     else:
         conv.inject_system_event(
-            f"PAYMENT_UNCLEAR: No se pudo verificar el comprobante claramente. "
-            f"Notas: {result.get('notes', '')}. "
-            f"Pide que lo envie de nuevo con mejor calidad, asegurandose de que se vea el numero destino, "
-            f"monto y fecha."
+            f"IMAGE_ANALYSIS: El usuario envio una imagen. "
+            f"Descripcion: {description}. "
+            f"Sugerencia: {suggestion}. "
+            f"Responde de forma natural y amigable."
         )
 
     reply = await _generate_reply(conv)
@@ -127,7 +209,6 @@ async def _handle_image(
 async def _handle_text(conv: ConversationState, text: str) -> None:
     conv.add_message("user", text)
 
-    # Phase-specific logic before calling AI
     if conv.phase == "awaiting_slot_selection":
         await _try_parse_slot_selection(conv, text)
         return
@@ -136,11 +217,10 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_collect_data_and_schedule(conv)
         return
 
-    # General conversation — let GPT-4o guide the flow
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
 
-    # Detect if bot just gave payment instructions (Nequi 3006278237)
+    # Detect when bot gave payment instructions
     if "3006278237" in reply and conv.phase == "chatting":
         conv.phase = "awaiting_screenshot"
 
@@ -150,38 +230,31 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
 # ---------------------------------------------------------------------------
 
 async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
-    """After payment is verified, collect name/phone then show calendar."""
-    # Extract data from conversation so far
     extracted = await ai.extract_user_data(conv.messages)
 
-    name = extracted.get("name") or conv.collected_name
-    phone = extracted.get("phone") or conv.collected_phone
-    email = extracted.get("email") or conv.collected_email
+    if extracted.get("name"):
+        conv.collected_name = extracted["name"]
+        # Update display name too so future messages use real name
+        conv.user_display_name = extracted["name"].split()[0]
+    if extracted.get("phone"):
+        conv.collected_phone = extracted["phone"]
+    if extracted.get("email"):
+        conv.collected_email = extracted["email"]
 
-    # Update stored data
-    if name:
-        conv.collected_name = name
-    if phone:
-        conv.collected_phone = phone
-    if email:
-        conv.collected_email = email
-
-    # Only proceed to calendar once we have at least a name
-    if name:
+    if conv.collected_name:
         slots = await calendar.get_available_slots(days_ahead=7)
-
         if slots:
             conv.calendar_slots_json = json.dumps([s.isoformat() for s in slots])
             conv.phase = "awaiting_slot_selection"
             formatted = calendar.format_slots_for_whatsapp(slots)
             conv.inject_system_event(
-                f"CALENDAR_SLOTS: Los siguientes horarios estan disponibles para la valoracion. "
-                f"Presentaselos al usuario de forma amigable y pidele que elija uno:\n{formatted}"
+                f"CALENDAR_SLOTS: Horarios disponibles para la valoracion. "
+                f"Presentaselos de forma amigable y pide que elijan uno:\n{formatted}"
             )
         else:
             conv.inject_system_event(
-                "CALENDAR_ERROR: No hay horarios disponibles en el calendario en este momento. "
-                "Dile al usuario que Yesica se pondra en contacto con el/ella para coordinar el horario personalizado."
+                "CALENDAR_ERROR: No hay horarios disponibles. "
+                "Dile que Yesica se pondra en contacto para coordinar el horario."
             )
 
     reply = await _generate_reply(conv)
@@ -189,71 +262,139 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
 
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
-    """Parse the user's slot selection and create the calendar event."""
     if not conv.calendar_slots_json:
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
 
-    slots = [datetime.fromisoformat(s).replace(tzinfo=COLOMBIA_TZ)
-             for s in json.loads(conv.calendar_slots_json)]
+    slots = [
+        datetime.fromisoformat(s).replace(tzinfo=COLOMBIA_TZ)
+        for s in json.loads(conv.calendar_slots_json)
+    ]
 
     selected_slot = _extract_slot_from_text(text, slots)
 
     if selected_slot:
-        # Create the calendar event
         event = await calendar.create_appointment(
             selected_slot,
             conv.collected_name or conv.user_display_name or "Cliente",
             conv.collected_phone or conv.phone,
             conv.collected_email or "",
         )
-
         conv.appointment_datetime = selected_slot.isoformat()
         conv.phase = "appointment_confirmed"
 
         if event:
             formatted_dt = _format_appointment_datetime(selected_slot)
             conv.inject_system_event(
-                f"APPOINTMENT_CONFIRMED: La cita fue creada exitosamente en el calendario de Yesica. "
+                f"APPOINTMENT_CONFIRMED: Cita creada exitosamente. "
                 f"Fecha y hora: {formatted_dt}. "
-                f"Nombre del cliente: {conv.collected_name or conv.user_display_name}. "
-                f"Da todos los detalles de confirmacion: fecha/hora, direccion completa, como llegar, "
-                f"recordatorio de llegar 5-10 min antes, y politica de cancelacion (24 horas de anticipacion)."
+                f"Da todos los detalles: fecha/hora, direccion completa, como llegar en Metro, "
+                f"llegar 5-10 min antes, cancelar con 24h de anticipacion."
             )
-            # Final notification to Yesica with full details
             asyncio.create_task(
-                _notify_yesica_appointment(
-                    conv.phone,
-                    conv.collected_name or conv.user_display_name,
-                    formatted_dt,
-                )
+                _notify_yesica_appointment(conv, formatted_dt)
             )
         else:
             conv.inject_system_event(
-                "CALENDAR_ERROR: Hubo un problema al crear la cita en el calendario. "
-                "Dile al usuario que Yesica se pondra en contacto para confirmar el horario manualmente."
+                "CALENDAR_ERROR: Problema al crear la cita. "
+                "Yesica se pondra en contacto para confirmar manualmente."
             )
-    else:
-        # Could not parse the selection, let GPT-4o handle it
-        pass
 
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
 
 
-def _extract_slot_from_text(text: str, slots: list[datetime]) -> datetime | None:
-    """Try to match user's text to a slot number or time mention."""
-    text_clean = text.strip().lower()
+# ---------------------------------------------------------------------------
+# Multi-message sending
+# ---------------------------------------------------------------------------
 
-    # Try simple number match (1, 2, 3...)
+async def _send_and_record(conv: ConversationState, reply: str) -> None:
+    """Split reply by [MSG], send each part as a separate WhatsApp message."""
+    parts = [p.strip() for p in reply.split("[MSG]") if p.strip()]
+
+    if not parts:
+        return
+
+    full_reply = " ".join(parts)  # Store as single string in history
+    conv.add_message("assistant", full_reply)
+
+    for i, part in enumerate(parts):
+        await evolution.send_typing_presence(conv.phone)
+        # Delay between messages scaled to message length (more human)
+        delay = min(1.0 + len(part) * 0.015, 3.5)
+        await asyncio.sleep(delay)
+        await evolution.send_text_message(conv.phone, part)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+async def _generate_reply(conv: ConversationState) -> str:
+    """Build full messages list and call GPT-4o."""
+    # Inject user's name as a reminder for the AI
+    system_with_name = SYSTEM_PROMPT
+    if conv.user_display_name:
+        system_with_name = (
+            f"NOMBRE DEL USUARIO: {conv.user_display_name} — "
+            f"Usalo en cada respuesta para generar cercania.\n\n"
+            + SYSTEM_PROMPT
+        )
+
+    messages = [{"role": "system", "content": system_with_name}] + conv.messages
+    return await ai.chat(messages)
+
+
+async def _notify_yesica(conv: ConversationState) -> None:
+    """Send Yesica a WhatsApp notification when a payment is verified."""
+    settings = get_settings()
+    name = conv.collected_name or conv.user_display_name or "Desconocido"
+    service = conv.service_interest or "No especificado"
+    city = conv.city or "No especificada"
+
+    message = (
+        f"*Nuevo comprobante de pago verificado!*\n\n"
+        f"*Cliente:* {name}\n"
+        f"*WhatsApp:* +{conv.phone}\n"
+        f"*Servicio de interes:* {service}\n"
+        f"*Ciudad:* {city}\n"
+        f"*Servicio:* Valoracion Profesional - $25.000\n\n"
+        f"El comprobante fue verificado automaticamente. "
+        f"Se esta procediendo con el agendamiento."
+    )
+    await evolution.send_text_message(settings.yesica_phone, message)
+
+
+async def _notify_yesica_appointment(
+    conv: ConversationState,
+    appointment_dt: str,
+) -> None:
+    """Notify Yesica when an appointment is booked."""
+    settings = get_settings()
+    name = conv.collected_name or conv.user_display_name or "Desconocido"
+    message = (
+        f"*Nueva cita agendada!*\n\n"
+        f"*Cliente:* {name}\n"
+        f"*WhatsApp:* +{conv.phone}\n"
+        f"*Celular registrado:* {conv.collected_phone or 'No proporcionado'}\n"
+        f"*Correo:* {conv.collected_email or 'No proporcionado'}\n"
+        f"*Servicio de interes:* {conv.service_interest or 'No especificado'}\n"
+        f"*Cita:* Valoracion Profesional\n"
+        f"*Fecha y hora:* {appointment_dt}\n\n"
+        f"Ya quedo registrado en tu Google Calendar."
+    )
+    await evolution.send_text_message(settings.yesica_phone, message)
+
+
+def _extract_slot_from_text(text: str, slots: list[datetime]) -> datetime | None:
+    text_clean = text.strip().lower()
     match = re.search(r"\b([1-9]\d?)\b", text_clean)
     if match:
         idx = int(match.group(1)) - 1
         if 0 <= idx < len(slots):
             return slots[idx]
 
-    # Try word numbers (primero, segundo, tercero...)
     word_map = {
         "primero": 0, "primera": 0, "1ro": 0, "1ra": 0,
         "segundo": 1, "segunda": 1,
@@ -264,60 +405,7 @@ def _extract_slot_from_text(text: str, slots: list[datetime]) -> datetime | None
     for word, idx in word_map.items():
         if word in text_clean and idx < len(slots):
             return slots[idx]
-
     return None
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-async def _generate_reply(conv: ConversationState) -> str:
-    """Build full messages list (with system prompt) and call GPT-4o."""
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + conv.messages
-    return await ai.chat(messages)
-
-
-async def _send_and_record(conv: ConversationState, reply: str) -> None:
-    """Send the reply via Evolution API and record it in conversation history."""
-    await evolution.send_typing_presence(conv.phone)
-    await asyncio.sleep(1.5)  # Simulate human typing pause
-    success = await evolution.send_text_message(conv.phone, reply)
-    if success:
-        conv.add_message("assistant", reply)
-
-
-async def _notify_yesica(user_phone: str, user_name: str | None) -> None:
-    """Send Yesica a WhatsApp notification when a payment screenshot is received."""
-    settings = get_settings()
-    name_str = user_name or "Desconocido"
-    message = (
-        f"*Nuevo comprobante de pago recibido!*\n\n"
-        f"*Cliente:* {name_str}\n"
-        f"*WhatsApp:* +{user_phone}\n"
-        f"*Servicio:* Valoracion Profesional ($25.000)\n\n"
-        f"El comprobante fue verificado automaticamente. Pronto se procedera con el agendamiento."
-    )
-    await evolution.send_text_message(settings.yesica_phone, message)
-
-
-async def _notify_yesica_appointment(
-    user_phone: str,
-    user_name: str | None,
-    appointment_dt: str,
-) -> None:
-    """Notify Yesica that an appointment was booked."""
-    settings = get_settings()
-    name_str = user_name or "Desconocido"
-    message = (
-        f"*Nueva cita agendada!*\n\n"
-        f"*Cliente:* {name_str}\n"
-        f"*WhatsApp:* +{user_phone}\n"
-        f"*Servicio:* Valoracion Profesional\n"
-        f"*Fecha y hora:* {appointment_dt}\n\n"
-        f"Ya quedo registrado en tu calendario de Google."
-    )
-    await evolution.send_text_message(settings.yesica_phone, message)
 
 
 def _format_appointment_datetime(dt: datetime) -> str:
