@@ -445,15 +445,22 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
 
 async def _generate_reply(conv: ConversationState) -> str:
     """Build full messages list and call GPT-4o."""
-    system_with_name = SYSTEM_PROMPT
-    if conv.user_display_name:
-        system_with_name = (
-            f"NOMBRE DEL USUARIO: {conv.user_display_name} — "
-            f"Usalo en cada respuesta para generar cercania.\n\n"
-            + SYSTEM_PROMPT
-        )
+    now_col = datetime.now(COLOMBIA_TZ)
+    days_es = {0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves", 4: "viernes", 5: "sabado", 6: "domingo"}
+    months_es = {1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
+                 7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"}
+    fecha_actual = (
+        f"{days_es[now_col.weekday()]} {now_col.day} de {months_es[now_col.month]} de {now_col.year}, "
+        f"{now_col.strftime('%I:%M %p')} (hora Colombia)"
+    )
 
-    messages = [{"role": "system", "content": system_with_name}] + conv.messages
+    header = f"FECHA Y HORA ACTUAL: {fecha_actual}\n"
+    if conv.user_display_name:
+        header += f"NOMBRE DEL USUARIO: {conv.user_display_name} — Usalo en cada respuesta para generar cercania.\n"
+
+    system_with_context = header + "\n" + SYSTEM_PROMPT
+
+    messages = [{"role": "system", "content": system_with_context}] + conv.messages
     return await ai.chat(messages)
 
 

@@ -95,9 +95,8 @@ async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
 
     # Generate all potential slots
     available = []
+    # Start from today at business open — per-slot check handles filtering past/too-soon slots
     current_day = now.replace(hour=BUSINESS_HOURS_START, minute=0, second=0, microsecond=0)
-    if current_day < now:
-        current_day += timedelta(days=1)
 
     while current_day < end_range and len(available) < 12:
         if current_day.weekday() in BUSINESS_DAYS:

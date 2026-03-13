@@ -34,7 +34,9 @@ app = FastAPI(title="Estetica Real WhatsApp Bot", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "bot": "Estetica Real"}
+    from services.calendar import _get_credentials
+    cal_ok = _get_credentials() is not None
+    return {"status": "ok", "bot": "Estetica Real", "calendar": "connected" if cal_ok else "error"}
 
 
 @app.post("/webhook")
