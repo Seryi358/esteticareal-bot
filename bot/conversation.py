@@ -1,8 +1,13 @@
 import json
 import os
 from dataclasses import dataclass, field, asdict
+from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
+
 from config import get_settings
+
+COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
 
 @dataclass
@@ -19,7 +24,8 @@ class ConversationState:
     collected_email: Optional[str] = None
     calendar_slots_json: Optional[str] = None  # JSON string of available slots
     appointment_datetime: Optional[str] = None
-    human_takeover: bool = False  # True when Yesica has manually taken over
+    human_takeover: bool = False  # Legacy — kept for backward compat with saved JSONs
+    human_takeover_until: Optional[str] = None  # ISO timestamp — bot silent until this time
     messages: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -38,6 +44,23 @@ class ConversationState:
     def inject_system_event(self, event: str) -> None:
         """Inject a system event that the AI can read and react to."""
         self.messages.append({"role": "system", "content": event})
+
+    def is_human_takeover_active(self) -> bool:
+        """Check if Yesica's takeover window is still active."""
+        if not self.human_takeover_until:
+            return False
+        try:
+            until = datetime.fromisoformat(self.human_takeover_until).replace(tzinfo=COLOMBIA_TZ)
+            if datetime.now(COLOMBIA_TZ) < until:
+                return True
+            # Window expired — clear it
+            self.human_takeover_until = None
+            self.human_takeover = False
+            return False
+        except Exception:
+            self.human_takeover_until = None
+            self.human_takeover = False
+            return False
 
 
 def _conversation_path(phone: str) -> str:

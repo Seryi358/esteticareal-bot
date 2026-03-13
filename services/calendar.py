@@ -107,10 +107,10 @@ async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
     # Start from today at business open — per-slot check handles filtering past/too-soon slots
     current_day = now.replace(hour=BUSINESS_HOURS_START, minute=0, second=0, microsecond=0)
 
-    while current_day < end_range and len(available) < 12:
+    while current_day < end_range:
         if current_day.weekday() in BUSINESS_DAYS:
             slot = current_day
-            while slot.hour < BUSINESS_HOURS_END and len(available) < 12:
+            while slot.hour < BUSINESS_HOURS_END:
                 slot_end = slot + timedelta(minutes=SLOT_DURATION_MINUTES)
                 # Check if slot is in the future (at least 2 hours from now)
                 if slot > now + timedelta(hours=2):
@@ -135,29 +135,80 @@ def _overlaps_busy(
     return False
 
 
-def format_slots_for_whatsapp(slots: list[datetime]) -> str:
-    """Format available slots as a numbered list for WhatsApp."""
+def group_slots_into_ranges(slots: list[datetime]) -> list[tuple[datetime, datetime]]:
+    """Group consecutive slots into (range_start, range_end) tuples."""
     if not slots:
+        return []
+
+    ranges = []
+    range_start = slots[0]
+    prev = slots[0]
+
+    for slot in slots[1:]:
+        # Consecutive if same day and starts right after previous slot ends
+        same_day = slot.date() == prev.date()
+        consecutive = slot == prev + timedelta(minutes=SLOT_DURATION_MINUTES)
+        if same_day and consecutive:
+            prev = slot
+        else:
+            # Close current range — end is when the last slot's session finishes
+            ranges.append((range_start, prev + timedelta(minutes=SLOT_DURATION_MINUTES)))
+            range_start = slot
+            prev = slot
+
+    # Close last range
+    ranges.append((range_start, prev + timedelta(minutes=SLOT_DURATION_MINUTES)))
+    return ranges
+
+
+def _format_hour(dt: datetime) -> str:
+    """Format hour simply: '9am', '2pm', '10:30am'."""
+    minute = dt.strftime("%M")
+    hour = dt.hour
+    period = "am" if hour < 12 else "pm"
+    if hour == 0:
+        h = 12
+    elif hour > 12:
+        h = hour - 12
+    else:
+        h = hour
+    if minute == "00":
+        return f"{h}{period}"
+    return f"{h}:{minute}{period}"
+
+
+def format_slots_for_whatsapp(slots: list[datetime]) -> str:
+    """Format available slots as a single natural sentence with max 2 time ranges."""
+    ranges = group_slots_into_ranges(slots)
+    if not ranges:
         return "No hay horarios disponibles en este momento."
 
     days_es = {
-        0: "Lunes", 1: "Martes", 2: "Miercoles", 3: "Jueves",
-        4: "Viernes", 5: "Sabado", 6: "Domingo",
-    }
-    months_es = {
-        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
-        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
-        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
+        0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves",
+        4: "viernes", 5: "sabado", 6: "domingo",
     }
 
-    lines = []
-    for i, slot in enumerate(slots, 1):
-        day_name = days_es[slot.weekday()]
-        month_name = months_es[slot.month]
-        time_str = slot.strftime("%I:%M %p").lstrip("0")
-        lines.append(f"{i}. {day_name} {slot.day} de {month_name} a las {time_str}")
+    # Limit to 2 ranges max — keep it ultra simple
+    ranges = ranges[:2]
 
-    return "\n".join(lines)
+    now = datetime.now(COLOMBIA_TZ)
+    parts = []
+    for start, end in ranges:
+        start_str = _format_hour(start)
+        end_str = _format_hour(end)
+
+        if start.date() == now.date():
+            label = "hoy"
+        elif start.date() == (now + timedelta(days=1)).date():
+            label = "mañana"
+        else:
+            label = f"el {days_es[start.weekday()]}"
+
+        parts.append(f"{label} de {start_str} a {end_str}")
+
+    if len(parts) == 1:
+        return parts[0]
+    return f"{parts[0]} y {parts[1]}"
 
 
 async def create_appointment(

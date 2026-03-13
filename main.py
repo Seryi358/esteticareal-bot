@@ -2,6 +2,8 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
@@ -9,6 +11,9 @@ from fastapi.responses import JSONResponse
 from bot.conversation import load_conversation, save_conversation
 from bot.flow import process_message
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
+
+COLOMBIA_TZ = ZoneInfo("America/Bogota")
+TAKEOVER_WINDOW_MINUTES = 10
 
 logging.basicConfig(
     level=logging.INFO,
@@ -118,19 +123,23 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 async def _handle_yesica_intervention(phone: str, text: str) -> None:
     """
     Called when Yesica manually types a message from the bot's WhatsApp.
-    - Activates human_takeover on the conversation so the bot stays silent.
-    - If Yesica types !bot, re-enables the bot for that conversation.
+    - Sets a 10-minute takeover window (bot stays silent).
+    - Each new message from Yesica resets the 10-minute window.
+    - If Yesica types !bot, immediately re-enables the bot.
     """
     conv = load_conversation(phone)
 
     if text.lower() == RESUME_BOT_COMMAND:
         conv.human_takeover = False
+        conv.human_takeover_until = None
         save_conversation(conv)
-        logger.info(f"Bot re-enabled for {phone} by Yesica")
-    elif not conv.human_takeover:
+        logger.info(f"Bot re-enabled immediately for {phone} by Yesica (!bot)")
+    else:
+        until = datetime.now(COLOMBIA_TZ) + timedelta(minutes=TAKEOVER_WINDOW_MINUTES)
         conv.human_takeover = True
+        conv.human_takeover_until = until.isoformat()
         save_conversation(conv)
-        logger.info(f"Human takeover activated for {phone} — Yesica is handling this conversation")
+        logger.info(f"Human takeover for {phone} — bot silent until {until.strftime('%H:%M:%S')}")
 
 
 # ---------------------------------------------------------------------------

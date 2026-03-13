@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from bot.conversation import ConversationState, load_conversation, save_conversation
@@ -39,11 +39,15 @@ async def process_message(
     if push_name:
         _pending_names[phone] = push_name
 
-    # Check human takeover — if Yesica is handling this, bot stays silent
+    # Check human takeover — if Yesica's window is active, bot stays silent
     conv = load_conversation(phone)
-    if conv.human_takeover:
-        logger.info(f"Human takeover active for {phone} — bot silent")
+    if conv.is_human_takeover_active():
+        logger.info(f"Human takeover active for {phone} (until {conv.human_takeover_until}) — bot silent")
         return
+    # Clear expired takeover flag if it was left on
+    if conv.human_takeover and not conv.human_takeover_until:
+        conv.human_takeover = False
+        save_conversation(conv)
 
     # Audio — transcribe first, then treat as text (no debounce needed for audio)
     if message_type == "audioMessage":
@@ -355,8 +359,9 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     else:
         # Could not parse — ask user to clarify
         conv.inject_system_event(
-            "INSTRUCCION: El usuario no indico claramente que horario quiere. "
-            "Pidele que responda con el numero del horario (por ejemplo '1', '2', etc.)."
+            "INSTRUCCION: No se pudo identificar el horario que el usuario quiere. "
+            "Pidele amablemente que diga el dia y la hora que prefiere, "
+            "por ejemplo: 'mañana a las 10am' o 'el jueves a las 2pm'."
         )
 
     reply = await _generate_reply(conv)
@@ -450,8 +455,11 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
         conv.phase = "awaiting_slot_selection"
         formatted = calendar.format_slots_for_whatsapp(slots)
         conv.inject_system_event(
-            f"CALENDAR_SLOTS: Estos son los horarios REALES disponibles en el calendario de Yesica. "
-            f"Envialos al usuario exactamente como aparecen aqui y pide que elija uno:\n{formatted}"
+            f"CALENDAR_SLOTS: Yesica tiene libre {formatted}. "
+            f"INSTRUCCION: Dile esto al usuario en UNA SOLA FRASE corta y natural, "
+            f"por ejemplo 'Yesica tiene libre {formatted}' y pregunta que hora le sirve. "
+            f"NO hagas lista, NO uses bullet points, NO enumeres horarios individuales. "
+            f"Maximo 2 burbujas."
         )
         logger.info(f"Calendar slots fetched successfully for {conv.phone}: {len(slots)} slots")
     else:
@@ -581,23 +589,101 @@ async def _notify_yesica_appointment(
 
 
 def _extract_slot_from_text(text: str, slots: list[datetime]) -> datetime | None:
-    text_clean = text.strip().lower()
-    match = re.search(r"\b([1-9]\d?)\b", text_clean)
-    if match:
-        idx = int(match.group(1)) - 1
-        if 0 <= idx < len(slots):
-            return slots[idx]
+    """Parse natural time references like 'mañana a las 10', 'el jueves a las 3pm'."""
+    if not slots:
+        return None
 
-    word_map = {
-        "primero": 0, "primera": 0, "1ro": 0, "1ra": 0,
-        "segundo": 1, "segunda": 1,
-        "tercero": 2, "tercera": 2,
-        "cuarto": 3, "cuarta": 3,
-        "quinto": 4, "quinta": 4,
-    }
-    for word, idx in word_map.items():
-        if word in text_clean and idx < len(slots):
-            return slots[idx]
+    text_clean = text.strip().lower()
+    now = datetime.now(COLOMBIA_TZ)
+
+    # --- 1. Try to identify the target DAY ---
+    target_date = None
+    if "hoy" in text_clean:
+        target_date = now.date()
+    elif "mañana" in text_clean or "manana" in text_clean:
+        target_date = (now + timedelta(days=1)).date()
+    else:
+        day_names = {
+            "lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2,
+            "jueves": 3, "viernes": 4, "sabado": 5, "sábado": 5,
+        }
+        for name, weekday in day_names.items():
+            if name in text_clean:
+                days_ahead = (weekday - now.weekday()) % 7
+                if days_ahead == 0:
+                    # Could be today or next week — pick based on available slots
+                    if any(s.date() == now.date() and s.weekday() == weekday for s in slots):
+                        target_date = now.date()
+                    else:
+                        target_date = (now + timedelta(days=7)).date()
+                else:
+                    target_date = (now + timedelta(days=days_ahead)).date()
+                break
+
+    # --- 2. Try to identify the target HOUR ---
+    target_hour = None
+    target_minute = 0
+
+    # Patterns: "10am", "10 am", "2pm", "2:30 pm", "14:00", "a las 10", "las 3"
+    time_match = re.search(
+        r'(?:a\s+las\s+|las\s+)?(\d{1,2})\s*(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?',
+        text_clean,
+    )
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2)) if time_match.group(2) else 0
+        period = time_match.group(3)
+
+        if period and period.startswith("p") and hour < 12:
+            hour += 12
+        elif period and period.startswith("a") and hour == 12:
+            hour = 0
+        elif not period and 1 <= hour <= 7:
+            # Ambiguous — assume PM for business hours (1pm-7pm range)
+            hour += 12
+
+        target_hour = hour
+        target_minute = minute
+
+    # Handle "en la mañana" / "en la tarde" without specific time
+    if target_hour is None:
+        if "mañana" not in text_clean and ("mañ" in text_clean or "manan" in text_clean):
+            # Careful: "mañana" means tomorrow, "en la mañana" means morning
+            pass
+        if re.search(r"en la mañana|por la mañana|temprano", text_clean):
+            target_hour = 9  # default morning
+        elif re.search(r"en la tarde|por la tarde|tarde", text_clean):
+            target_hour = 14  # default afternoon
+
+    # --- 3. Match against available slots ---
+
+    # Best case: both day and hour known
+    if target_date and target_hour is not None:
+        target_dt = datetime(
+            target_date.year, target_date.month, target_date.day,
+            target_hour, target_minute, tzinfo=COLOMBIA_TZ,
+        )
+        candidates = [s for s in slots if s.date() == target_date]
+        if candidates:
+            best = min(candidates, key=lambda s: abs((s - target_dt).total_seconds()))
+            # Accept if within 40 minutes of requested time
+            if abs((best - target_dt).total_seconds()) <= 40 * 60:
+                return best
+
+    # Only hour given — find first slot at/near that hour on any day
+    if target_hour is not None and target_date is None:
+        candidates = [s for s in slots if s.hour == target_hour]
+        if not candidates:
+            candidates = [s for s in slots if abs(s.hour - target_hour) <= 1]
+        if candidates:
+            return candidates[0]
+
+    # Only day given — return first slot on that day
+    if target_date and target_hour is None:
+        candidates = [s for s in slots if s.date() == target_date]
+        if candidates:
+            return candidates[0]
+
     return None
 
 
