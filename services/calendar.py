@@ -1,6 +1,8 @@
+import asyncio
 import os
 import logging
 from datetime import datetime, timedelta, timezone
+from functools import partial
 from zoneinfo import ZoneInfo
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -73,15 +75,22 @@ async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
     now = datetime.now(COLOMBIA_TZ)
     end_range = now + timedelta(days=days_ahead)
 
-    # Fetch busy times from Google Calendar
+    # Fetch busy times from Google Calendar (run blocking call in thread with timeout)
     try:
         body = {
             "timeMin": now.isoformat(),
             "timeMax": end_range.isoformat(),
             "items": [{"id": settings.google_calendar_id}],
         }
-        freebusy = service.freebusy().query(body=body).execute()
+        loop = asyncio.get_event_loop()
+        freebusy = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: service.freebusy().query(body=body).execute()),
+            timeout=15,
+        )
         busy_periods = freebusy["calendars"][settings.google_calendar_id]["busy"]
+    except asyncio.TimeoutError:
+        logger.error("Timeout fetching freebusy from Google Calendar")
+        return []
     except Exception as e:
         logger.error(f"Error fetching freebusy: {e}")
         return []
@@ -196,13 +205,21 @@ async def create_appointment(
     }
 
     try:
-        event = (
-            service.events()
-            .insert(calendarId=settings.google_calendar_id, body=event_body)
-            .execute()
+        loop = asyncio.get_event_loop()
+        event = await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: service.events()
+                .insert(calendarId=settings.google_calendar_id, body=event_body)
+                .execute(),
+            ),
+            timeout=15,
         )
         logger.info(f"Calendar event created: {event.get('id')}")
         return event
+    except asyncio.TimeoutError:
+        logger.error("Timeout creating calendar event")
+        return None
     except Exception as e:
         logger.error(f"Error creating calendar event: {e}")
         return None

@@ -50,8 +50,16 @@ async def process_message(
         conv = load_conversation(phone)
         if push_name and not conv.user_display_name:
             conv.user_display_name = push_name
-        await _handle_audio(conv, media_key_id, media_base64_inline)
-        save_conversation(conv)
+        try:
+            await _handle_audio(conv, media_key_id, media_base64_inline)
+        except Exception as e:
+            logger.error(f"CRITICAL: Unhandled error in _handle_audio for {phone}: {e}", exc_info=True)
+            try:
+                await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente con el audio 😅 Me lo puedes enviar de nuevo o escribirme?")
+            except Exception:
+                pass
+        finally:
+            save_conversation(conv)
         return
 
     # Images are processed immediately (no debounce)
@@ -59,8 +67,16 @@ async def process_message(
         conv = load_conversation(phone)
         if push_name and not conv.user_display_name:
             conv.user_display_name = push_name
-        await _handle_image(conv, media_key_id, media_base64_inline)
-        save_conversation(conv)
+        try:
+            await _handle_image(conv, media_key_id, media_base64_inline)
+        except Exception as e:
+            logger.error(f"CRITICAL: Unhandled error in _handle_image for {phone}: {e}", exc_info=True)
+            try:
+                await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente con la imagen 😅 Me la puedes enviar de nuevo?")
+            except Exception:
+                pass
+        finally:
+            save_conversation(conv)
         return
 
     # Text messages go through debounce
@@ -101,8 +117,16 @@ async def _fire_after_delay(phone: str, delay: float) -> None:
     if push_name and not conv.user_display_name:
         conv.user_display_name = push_name
 
-    await _handle_text(conv, combined)
-    save_conversation(conv)
+    try:
+        await _handle_text(conv, combined)
+    except Exception as e:
+        logger.error(f"CRITICAL: Unhandled error in _handle_text for {phone}: {e}", exc_info=True)
+        try:
+            await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente tecnico 😅 Dame un momento y te respondo!")
+        except Exception:
+            pass
+    finally:
+        save_conversation(conv)
 
 
 # ---------------------------------------------------------------------------
@@ -341,7 +365,14 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
 
 async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
     """Payment was verified. Collect user data and create the appointment."""
-    extracted = await ai.extract_user_data(conv.messages)
+    logger.info(f"[{conv.phone}] Collecting data — phase={conv.phase}, appointment_datetime={conv.appointment_datetime}")
+
+    try:
+        extracted = await ai.extract_user_data(conv.messages)
+        logger.info(f"[{conv.phone}] Extracted data: {extracted}")
+    except Exception as e:
+        logger.error(f"[{conv.phone}] Data extraction failed: {e}", exc_info=True)
+        extracted = {"name": None, "phone": None, "email": None}
 
     if extracted.get("name"):
         conv.collected_name = extracted["name"]
@@ -353,8 +384,18 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
 
     # Use the slot chosen before payment, or fetch new ones as fallback
     if conv.appointment_datetime:
-        await _create_appointment_from_saved_slot(conv)
+        logger.info(f"[{conv.phone}] Creating appointment for saved slot: {conv.appointment_datetime}")
+        try:
+            await _create_appointment_from_saved_slot(conv)
+        except Exception as e:
+            logger.error(f"[{conv.phone}] Failed to create appointment: {e}", exc_info=True)
+            conv.phase = "appointment_confirmed"
+            conv.inject_system_event(
+                "CALENDAR_ERROR: Hubo un problema al crear la cita en el calendario. "
+                "Yesica se pondra en contacto manualmente para confirmar el horario."
+            )
     else:
+        logger.info(f"[{conv.phone}] No saved slot — fetching new slots")
         await _fetch_and_inject_slots(conv)
 
     reply = await _generate_reply(conv)
