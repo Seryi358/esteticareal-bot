@@ -279,6 +279,14 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     # Detect when bot gave payment instructions
     if "3006278237" in reply and conv.phase == "chatting":
         conv.phase = "awaiting_screenshot"
+        return
+
+    # If payment is verified and bot is promising to show slots but hasn't yet,
+    # fetch them now and send a follow-up message with real available times.
+    if conv.payment_verified and conv.phase not in ("awaiting_slot_selection", "appointment_confirmed"):
+        scheduling_keywords = ("horario", "disponib", "agendar", "agenda", "cita", "fecha", "hora")
+        if any(kw in reply.lower() for kw in scheduling_keywords):
+            await _fetch_and_inject_slots(conv)
 
 
 # ---------------------------------------------------------------------------
@@ -290,31 +298,35 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
 
     if extracted.get("name"):
         conv.collected_name = extracted["name"]
-        # Update display name too so future messages use real name
         conv.user_display_name = extracted["name"].split()[0]
     if extracted.get("phone"):
         conv.collected_phone = extracted["phone"]
     if extracted.get("email"):
         conv.collected_email = extracted["email"]
 
-    if conv.collected_name:
-        slots = await calendar.get_available_slots(days_ahead=7)
-        if slots:
-            conv.calendar_slots_json = json.dumps([s.isoformat() for s in slots])
-            conv.phase = "awaiting_slot_selection"
-            formatted = calendar.format_slots_for_whatsapp(slots)
-            conv.inject_system_event(
-                f"CALENDAR_SLOTS: Horarios disponibles para la valoracion. "
-                f"Presentaselos de forma amigable y pide que elijan uno:\n{formatted}"
-            )
-        else:
-            conv.inject_system_event(
-                "CALENDAR_ERROR: No hay horarios disponibles. "
-                "Dile que Yesica se pondra en contacto para coordinar el horario."
-            )
+    # Fetch slots as soon as we have at least a name (or even without it)
+    await _fetch_and_inject_slots(conv)
 
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
+
+
+async def _fetch_and_inject_slots(conv: ConversationState) -> None:
+    """Fetch real calendar slots and inject them into the conversation."""
+    slots = await calendar.get_available_slots(days_ahead=7)
+    if slots:
+        conv.calendar_slots_json = json.dumps([s.isoformat() for s in slots])
+        conv.phase = "awaiting_slot_selection"
+        formatted = calendar.format_slots_for_whatsapp(slots)
+        conv.inject_system_event(
+            f"CALENDAR_SLOTS: Estos son los horarios REALES disponibles en el calendario de Yesica. "
+            f"Envialos al usuario exactamente como aparecen aqui y pide que elija uno:\n{formatted}"
+        )
+    else:
+        conv.inject_system_event(
+            "CALENDAR_ERROR: No hay horarios disponibles en el calendario en este momento. "
+            "Dile al usuario que Yesica se pondra en contacto para coordinar el horario."
+        )
 
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
