@@ -13,8 +13,8 @@ COLOMBIA_TZ = ZoneInfo("America/Bogota")
 SCOPES = ["https://www.googleapis.com/auth/calendar"]
 
 # Business hours (local Colombia time)
-BUSINESS_HOURS_START = 8   # 8:00 AM
-BUSINESS_HOURS_END = 19    # 7:00 PM
+BUSINESS_HOURS_START = 9   # 9:00 AM
+BUSINESS_HOURS_END = 17    # 5:00 PM
 SLOT_DURATION_MINUTES = 40  # 30 min session + 10 min buffer
 BUSINESS_DAYS = {0, 1, 2, 3, 4, 5}  # Monday=0 to Saturday=5 (Sunday=6 excluded)
 

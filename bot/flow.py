@@ -467,29 +467,27 @@ async def _generate_reply(conv: ConversationState) -> str:
 async def _notify_yesica(conv: ConversationState) -> None:
     """Send Yesica a WhatsApp notification when a payment is verified."""
     settings = get_settings()
-    name = conv.collected_name or conv.user_display_name or "Desconocido"
+    name = conv.collected_name or conv.user_display_name or "Pendiente"
     service = conv.service_interest or "No especificado"
     city = conv.city or "No especificada"
 
-    # Include appointment time if already selected
-    cita_info = ""
+    cita_info = "Pendiente de confirmar"
     if conv.appointment_datetime:
         try:
             slot = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
-            cita_info = f"\n*Horario elegido:* {_format_appointment_datetime(slot)}"
+            cita_info = _format_appointment_datetime(slot)
         except Exception:
             pass
 
     message = (
-        f"*Nuevo comprobante de pago verificado!*\n\n"
-        f"*Cliente:* {name}\n"
+        f"🔔 *Nuevo pago de valoración recibido*\n\n"
+        f"*Paciente:* {name}\n"
         f"*WhatsApp:* +{conv.phone}\n"
-        f"*Servicio de interes:* {service}\n"
+        f"*Tratamiento de interés:* {service}\n"
         f"*Ciudad:* {city}\n"
-        f"*Servicio:* Valoracion Profesional - $25.000"
-        f"{cita_info}\n\n"
-        f"El comprobante fue verificado automaticamente. "
-        f"Se esta procediendo con el agendamiento."
+        f"*Valoración pagada:* $25.000\n"
+        f"*Cita solicitada:* {cita_info}\n\n"
+        f"Por favor valida el comprobante en el chat del paciente."
     )
     await evolution.send_text_message(settings.yesica_phone, message)
 
@@ -500,17 +498,16 @@ async def _notify_yesica_appointment(
 ) -> None:
     """Notify Yesica when an appointment is booked."""
     settings = get_settings()
-    name = conv.collected_name or conv.user_display_name or "Desconocido"
+    name = conv.collected_name or conv.user_display_name or "Pendiente"
     message = (
-        f"*Nueva cita agendada!*\n\n"
-        f"*Cliente:* {name}\n"
+        f"✅ *Nueva valoración agendada*\n\n"
+        f"*Paciente:* {name}\n"
+        f"*Teléfono:* +{conv.collected_phone or conv.phone}\n"
         f"*WhatsApp:* +{conv.phone}\n"
-        f"*Celular registrado:* {conv.collected_phone or 'No proporcionado'}\n"
-        f"*Correo:* {conv.collected_email or 'No proporcionado'}\n"
-        f"*Servicio de interes:* {conv.service_interest or 'No especificado'}\n"
-        f"*Cita:* Valoracion Profesional\n"
-        f"*Fecha y hora:* {appointment_dt}\n\n"
-        f"Ya quedo registrado en tu Google Calendar."
+        f"*Tratamiento:* {conv.service_interest or 'No especificado'}\n"
+        f"*Valoración pagada:* Sí — $25.000\n"
+        f"*Fecha:* {appointment_dt}\n\n"
+        f"Quedó registrado en tu Google Calendar 📅"
     )
     await evolution.send_text_message(settings.yesica_phone, message)
 
