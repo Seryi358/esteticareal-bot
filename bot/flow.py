@@ -456,7 +456,14 @@ async def _generate_reply(conv: ConversationState) -> str:
 
     header = f"FECHA Y HORA ACTUAL: {fecha_actual}\n"
     if conv.user_display_name:
-        header += f"NOMBRE DEL USUARIO: {conv.user_display_name} — Usalo en cada respuesta para generar cercania.\n"
+        header += (
+            f"NOMBRE DEL USUARIO: {conv.user_display_name}\n"
+            f"INSTRUCCION OBLIGATORIA: En el primer mensaje de la conversacion DEBES empezar con su nombre "
+            f"(ej: 'Hola {conv.user_display_name}!' o '{conv.user_display_name}! Que bueno...'). "
+            f"En mensajes siguientes usalo de vez en cuando.\n"
+        )
+    else:
+        header += "NOMBRE DEL USUARIO: Desconocido — usa 'amor' o 'chica' y pregunta su nombre naturalmente.\n"
 
     system_with_context = header + "\n" + SYSTEM_PROMPT
 
