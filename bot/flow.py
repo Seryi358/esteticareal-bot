@@ -135,7 +135,6 @@ async def _handle_audio(
 
     if transcription:
         logger.info(f"Audio from {conv.phone} transcribed: {transcription[:60]}")
-        # Process the transcribed text as a normal message
         await _handle_text(conv, transcription)
     else:
         conv.inject_system_event(
@@ -190,7 +189,7 @@ async def _handle_image(
             conv.inject_system_event(
                 f"PAYMENT_VERIFIED: Comprobante verificado exitosamente. "
                 f"Monto detectado: {analysis.get('payment_amount', '$25.000')}. "
-                f"Ahora pide el nombre completo y celular del usuario para agendar."
+                f"Ahora pide el nombre completo y celular del usuario para confirmar la cita."
             )
             if not conv.notification_sent:
                 asyncio.create_task(_notify_yesica(conv))
@@ -198,8 +197,8 @@ async def _handle_image(
 
         elif not analysis.get("payment_appears_authentic"):
             conv.inject_system_event(
-                f"PAYMENT_INVALID: El comprobante parece no ser autentico. "
-                f"Con mucho tacto pide que contacte a Yesica al 3006278237."
+                "PAYMENT_INVALID: El comprobante parece no ser autentico. "
+                "Con mucho tacto pide que contacte a Yesica al 3006278237."
             )
         else:
             conv.inject_system_event(
@@ -209,7 +208,6 @@ async def _handle_image(
             )
 
     elif image_type == "PAYMENT" and conv.phase != "awaiting_screenshot":
-        # Payment screenshot but not expected — could be trying to pay
         conv.inject_system_event(
             f"IMAGE_ANALYSIS: El usuario envio lo que parece ser un comprobante de pago "
             f"({description}), pero todavia no habiamos llegado al paso del pago. "
@@ -276,61 +274,32 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
 
-    # Detect when bot gave payment instructions
-    if "3006278237" in reply and conv.phase == "chatting":
-        conv.phase = "awaiting_screenshot"
+    # Detect trigger phrase → fetch real slots and send them immediately
+    slot_trigger_phrases = ("revisar los horarios", "horarios disponibles de yesica", "dejame revisar")
+    reply_lower = reply.lower()
+    if any(t in reply_lower for t in slot_trigger_phrases):
+        if conv.phase not in ("awaiting_slot_selection", "awaiting_screenshot", "collecting_data", "appointment_confirmed"):
+            logger.info(f"Slot trigger detected for {conv.phone} — fetching calendar slots")
+            await _fetch_and_inject_slots(conv)
+            if conv.phase == "awaiting_slot_selection":
+                slot_reply = await _generate_reply(conv)
+                await _send_and_record(conv, slot_reply)
         return
 
-    # If payment is verified and bot is promising to show slots but hasn't yet,
-    # fetch them now and send a follow-up message with real available times.
-    if conv.payment_verified and conv.phase not in ("awaiting_slot_selection", "appointment_confirmed"):
-        scheduling_keywords = ("horario", "disponib", "agendar", "agenda", "cita", "fecha", "hora")
-        if any(kw in reply.lower() for kw in scheduling_keywords):
-            await _fetch_and_inject_slots(conv)
+    # Detect when Nequi payment instructions were given (fallback path)
+    if "3006278237" in reply and conv.phase not in ("awaiting_screenshot", "collecting_data", "appointment_confirmed"):
+        conv.phase = "awaiting_screenshot"
 
 
 # ---------------------------------------------------------------------------
-# Data collection & scheduling
+# Slot selection → payment instructions
 # ---------------------------------------------------------------------------
-
-async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
-    extracted = await ai.extract_user_data(conv.messages)
-
-    if extracted.get("name"):
-        conv.collected_name = extracted["name"]
-        conv.user_display_name = extracted["name"].split()[0]
-    if extracted.get("phone"):
-        conv.collected_phone = extracted["phone"]
-    if extracted.get("email"):
-        conv.collected_email = extracted["email"]
-
-    # Fetch slots as soon as we have at least a name (or even without it)
-    await _fetch_and_inject_slots(conv)
-
-    reply = await _generate_reply(conv)
-    await _send_and_record(conv, reply)
-
-
-async def _fetch_and_inject_slots(conv: ConversationState) -> None:
-    """Fetch real calendar slots and inject them into the conversation."""
-    slots = await calendar.get_available_slots(days_ahead=7)
-    if slots:
-        conv.calendar_slots_json = json.dumps([s.isoformat() for s in slots])
-        conv.phase = "awaiting_slot_selection"
-        formatted = calendar.format_slots_for_whatsapp(slots)
-        conv.inject_system_event(
-            f"CALENDAR_SLOTS: Estos son los horarios REALES disponibles en el calendario de Yesica. "
-            f"Envialos al usuario exactamente como aparecen aqui y pide que elija uno:\n{formatted}"
-        )
-    else:
-        conv.inject_system_event(
-            "CALENDAR_ERROR: No hay horarios disponibles en el calendario en este momento. "
-            "Dile al usuario que Yesica se pondra en contacto para coordinar el horario."
-        )
-
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
+    """User is picking a time slot. Parse selection, save it, then give payment instructions."""
     if not conv.calendar_slots_json:
+        # No slots available, re-fetch
+        await _fetch_and_inject_slots(conv)
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
@@ -343,34 +312,109 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     selected_slot = _extract_slot_from_text(text, slots)
 
     if selected_slot:
-        event = await calendar.create_appointment(
-            selected_slot,
-            conv.collected_name or conv.user_display_name or "Cliente",
-            conv.collected_phone or conv.phone,
-            conv.collected_email or "",
-        )
+        formatted_dt = _format_appointment_datetime(selected_slot)
+        # Save the chosen slot — appointment will be created after payment
         conv.appointment_datetime = selected_slot.isoformat()
-        conv.phase = "appointment_confirmed"
-
-        if event:
-            formatted_dt = _format_appointment_datetime(selected_slot)
-            conv.inject_system_event(
-                f"APPOINTMENT_CONFIRMED: Cita creada exitosamente. "
-                f"Fecha y hora: {formatted_dt}. "
-                f"Da todos los detalles: fecha/hora, direccion completa, como llegar en Metro, "
-                f"llegar 5-10 min antes, cancelar con 24h de anticipacion."
-            )
-            asyncio.create_task(
-                _notify_yesica_appointment(conv, formatted_dt)
-            )
-        else:
-            conv.inject_system_event(
-                "CALENDAR_ERROR: Problema al crear la cita. "
-                "Yesica se pondra en contacto para confirmar manualmente."
-            )
+        conv.phase = "awaiting_screenshot"
+        conv.inject_system_event(
+            f"El usuario eligio el horario: {formatted_dt}. "
+            f"Su cupo esta separado. Ahora dale las instrucciones de pago para confirmar:\n"
+            f"Nequi: *3006278237*\n"
+            f"Nombre: *Yesica Restrepo*\n"
+            f"Valor: *$25.000*\n"
+            f"Cuando hayas hecho el pago, enviame el pantallazo del comprobante."
+        )
+    else:
+        # Could not parse — ask user to clarify
+        conv.inject_system_event(
+            "INSTRUCCION: El usuario no indico claramente que horario quiere. "
+            "Pidele que responda con el numero del horario (por ejemplo '1', '2', etc.)."
+        )
 
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
+
+
+# ---------------------------------------------------------------------------
+# Data collection & appointment creation
+# ---------------------------------------------------------------------------
+
+async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
+    """Payment was verified. Collect user data and create the appointment."""
+    extracted = await ai.extract_user_data(conv.messages)
+
+    if extracted.get("name"):
+        conv.collected_name = extracted["name"]
+        conv.user_display_name = extracted["name"].split()[0]
+    if extracted.get("phone"):
+        conv.collected_phone = extracted["phone"]
+    if extracted.get("email"):
+        conv.collected_email = extracted["email"]
+
+    # Use the slot chosen before payment, or fetch new ones as fallback
+    if conv.appointment_datetime:
+        await _create_appointment_from_saved_slot(conv)
+    else:
+        await _fetch_and_inject_slots(conv)
+
+    reply = await _generate_reply(conv)
+    await _send_and_record(conv, reply)
+
+
+async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
+    """Create a Google Calendar appointment using the slot the user already selected."""
+    try:
+        slot = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+    except Exception as e:
+        logger.error(f"Invalid appointment_datetime for {conv.phone}: {e}")
+        await _fetch_and_inject_slots(conv)
+        return
+
+    event = await calendar.create_appointment(
+        slot,
+        conv.collected_name or conv.user_display_name or "Cliente",
+        conv.collected_phone or conv.phone,
+        conv.collected_email or "",
+    )
+    formatted_dt = _format_appointment_datetime(slot)
+    conv.phase = "appointment_confirmed"
+
+    if event:
+        conv.inject_system_event(
+            f"APPOINTMENT_CONFIRMED: Cita creada exitosamente. "
+            f"Fecha y hora: {formatted_dt}. "
+            f"Da todos los detalles al usuario: fecha/hora, direccion completa "
+            f"(Cra 49b #26b-50, Unidad Ciudad Central, Apto 1618, Torre 2, Bello), "
+            f"como llegar en Metro (a pasos de la Estacion Madera), "
+            f"llegar 5-10 min antes, cancelar con 24h de anticipacion."
+        )
+        asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
+    else:
+        conv.inject_system_event(
+            "CALENDAR_ERROR: Hubo un problema al crear la cita en el calendario. "
+            "Yesica se pondra en contacto manualmente para confirmar el horario."
+        )
+
+
+async def _fetch_and_inject_slots(conv: ConversationState) -> None:
+    """Fetch real calendar slots and inject them into the conversation."""
+    logger.info(f"Fetching calendar slots for {conv.phone}")
+    slots = await calendar.get_available_slots(days_ahead=7)
+    if slots:
+        conv.calendar_slots_json = json.dumps([s.isoformat() for s in slots])
+        conv.phase = "awaiting_slot_selection"
+        formatted = calendar.format_slots_for_whatsapp(slots)
+        conv.inject_system_event(
+            f"CALENDAR_SLOTS: Estos son los horarios REALES disponibles en el calendario de Yesica. "
+            f"Envialos al usuario exactamente como aparecen aqui y pide que elija uno:\n{formatted}"
+        )
+        logger.info(f"Calendar slots fetched successfully for {conv.phone}: {len(slots)} slots")
+    else:
+        logger.warning(f"No calendar slots found for {conv.phone}")
+        conv.inject_system_event(
+            "CALENDAR_ERROR: No hay horarios disponibles en el calendario en este momento. "
+            "Dile al usuario que Yesica se pondra en contacto para coordinar el horario."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -401,7 +445,6 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
 
 async def _generate_reply(conv: ConversationState) -> str:
     """Build full messages list and call GPT-4o."""
-    # Inject user's name as a reminder for the AI
     system_with_name = SYSTEM_PROMPT
     if conv.user_display_name:
         system_with_name = (
@@ -421,13 +464,23 @@ async def _notify_yesica(conv: ConversationState) -> None:
     service = conv.service_interest or "No especificado"
     city = conv.city or "No especificada"
 
+    # Include appointment time if already selected
+    cita_info = ""
+    if conv.appointment_datetime:
+        try:
+            slot = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+            cita_info = f"\n*Horario elegido:* {_format_appointment_datetime(slot)}"
+        except Exception:
+            pass
+
     message = (
         f"*Nuevo comprobante de pago verificado!*\n\n"
         f"*Cliente:* {name}\n"
         f"*WhatsApp:* +{conv.phone}\n"
         f"*Servicio de interes:* {service}\n"
         f"*Ciudad:* {city}\n"
-        f"*Servicio:* Valoracion Profesional - $25.000\n\n"
+        f"*Servicio:* Valoracion Profesional - $25.000"
+        f"{cita_info}\n\n"
         f"El comprobante fue verificado automaticamente. "
         f"Se esta procediendo con el agendamiento."
     )
