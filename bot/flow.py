@@ -143,7 +143,9 @@ async def _handle_audio(
 
     base64_data = media_base64_inline
     if not base64_data and media_key_id:
-        base64_data = await evolution.get_media_base64(media_key_id)
+        base64_data = await evolution.get_media_base64(media_key_id, phone=conv.phone)
+
+    logger.info(f"[{conv.phone}] Audio: inline={'yes' if media_base64_inline else 'no'}, key={media_key_id}, downloaded={'yes' if base64_data else 'NO'}")
 
     if not base64_data:
         conv.add_message("user", "[El usuario envio un audio pero no se pudo descargar]")
@@ -155,12 +157,14 @@ async def _handle_audio(
         await _send_and_record(conv, reply)
         return
 
+    logger.info(f"[{conv.phone}] Sending {len(base64_data)} chars to Whisper for transcription")
     transcription = await ai.transcribe_audio(base64_data)
 
     if transcription:
-        logger.info(f"Audio from {conv.phone} transcribed: {transcription[:60]}")
+        logger.info(f"[{conv.phone}] Whisper transcription: '{transcription[:100]}'")
         await _handle_text(conv, transcription)
     else:
+        logger.warning(f"[{conv.phone}] Whisper returned empty transcription")
         conv.inject_system_event(
             "INSTRUCCION: El usuario envio un audio pero no se pudo transcribir. "
             "Pidele amablemente que escriba su mensaje."
@@ -182,7 +186,7 @@ async def _handle_image(
     base64_data = media_base64_inline
     if not base64_data and media_key_id:
         await evolution.send_typing_presence(conv.phone)
-        base64_data = await evolution.get_media_base64(media_key_id)
+        base64_data = await evolution.get_media_base64(media_key_id, phone=conv.phone)
 
     if not base64_data:
         conv.inject_system_event(

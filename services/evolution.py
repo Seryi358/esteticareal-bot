@@ -72,16 +72,27 @@ async def send_typing_presence(phone: str) -> None:
         pass
 
 
-async def get_media_base64(message_key_id: str) -> str | None:
+async def get_media_base64(message_key_id: str, phone: str | None = None) -> str | None:
     """Download and return base64 of a media message."""
     url = f"{_base_url()}/chat/getBase64FromMediaMessage/{_instance()}"
-    payload = {"message": {"key": {"id": message_key_id}}}
+    # Build full message key — Evolution API often needs remoteJid to locate the message
+    key_obj: dict = {"id": message_key_id}
+    if phone:
+        key_obj["remoteJid"] = f"{phone}@s.whatsapp.net"
+        key_obj["fromMe"] = False
+    payload = {"message": {"key": key_obj}}
+    logger.info(f"Downloading media {message_key_id} for phone={phone}")
     try:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(url, json=payload, headers=_headers())
             response.raise_for_status()
             data = response.json()
-            return data.get("base64")
+            b64 = data.get("base64")
+            if b64:
+                logger.info(f"Media downloaded: {len(b64)} chars base64")
+            else:
+                logger.warning(f"Media response had no base64 field. Keys: {list(data.keys())}")
+            return b64
     except Exception as e:
         logger.error(f"Error downloading media {message_key_id}: {e}")
         return None
