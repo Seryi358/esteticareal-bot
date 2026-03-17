@@ -59,7 +59,7 @@ def is_bot_sent_message(message_id: str) -> bool:
 
 async def send_typing_presence(phone: str) -> None:
     """Send 'typing...' presence indicator for a more human feel."""
-    url = f"{_base_url()}/message/sendPresence/{_instance()}"
+    url = f"{_base_url()}/chat/sendPresence/{_instance()}"
     payload = {
         "number": phone,
         "presence": "composing",
