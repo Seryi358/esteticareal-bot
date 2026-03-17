@@ -53,13 +53,12 @@ class ConversationState:
             until = datetime.fromisoformat(self.human_takeover_until).replace(tzinfo=COLOMBIA_TZ)
             if datetime.now(COLOMBIA_TZ) < until:
                 return True
-            # Window expired — clear it
+            # Window expired — clear until but keep human_takeover=True
+            # so flow.py can detect the transition and inject context
             self.human_takeover_until = None
-            self.human_takeover = False
             return False
         except Exception:
             self.human_takeover_until = None
-            self.human_takeover = False
             return False
 
 

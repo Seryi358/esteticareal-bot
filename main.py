@@ -13,7 +13,7 @@ from bot.flow import process_message
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
-TAKEOVER_WINDOW_MINUTES = 10
+TAKEOVER_WINDOW_MINUTES = 5
 
 logging.basicConfig(
     level=logging.INFO,
@@ -123,8 +123,8 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 async def _handle_yesica_intervention(phone: str, text: str) -> None:
     """
     Called when Yesica manually types a message from the bot's WhatsApp.
-    - Sets a 10-minute takeover window (bot stays silent).
-    - Each new message from Yesica resets the 10-minute window.
+    - Sets a 5-minute takeover window (bot stays silent).
+    - Each new message from Yesica resets the 5-minute window.
     - If Yesica types !bot, immediately re-enables the bot.
     """
     conv = load_conversation(phone)
@@ -138,6 +138,10 @@ async def _handle_yesica_intervention(phone: str, text: str) -> None:
         until = datetime.now(COLOMBIA_TZ) + timedelta(minutes=TAKEOVER_WINDOW_MINUTES)
         conv.human_takeover = True
         conv.human_takeover_until = until.isoformat()
+        # Save Yesica's message in conversation history so the bot has full
+        # context when it resumes after the 5-minute window.
+        if text:
+            conv.add_message("assistant", text)
         save_conversation(conv)
         logger.info(f"Human takeover for {phone} — bot silent until {until.strftime('%H:%M:%S')}")
 

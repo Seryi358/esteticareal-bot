@@ -47,6 +47,12 @@ async def process_message(
     # Clear expired takeover flag if it was left on
     if conv.human_takeover and not conv.human_takeover_until:
         conv.human_takeover = False
+        conv.inject_system_event(
+            "YESICA_HANDBACK: Yésica acaba de terminar de hablar con este cliente. "
+            "Lee los mensajes anteriores de Yésica (aparecen como 'assistant') para "
+            "tener contexto de lo que hablaron. Continúa la conversación de forma "
+            "natural sin repetir lo que Yésica ya dijo."
+        )
         save_conversation(conv)
 
     # Audio — transcribe first, then treat as text (no debounce needed for audio)
