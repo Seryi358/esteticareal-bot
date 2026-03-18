@@ -479,6 +479,15 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         await _fetch_and_inject_slots(conv)
         return
 
+    # Send address before creating the appointment
+    address_msg = (
+        "📍 *Aquí nos encuentras:*\n\n"
+        "Cra 49b #26b-50, Unidad Ciudad Central, Apto 1618, Torre 2, Bello\n\n"
+        "🚇 Estamos a pasos de la Estación Madera del Metro\n"
+        "🅿️ Parqueadero disponible"
+    )
+    await evolution.send_text_message(conv.phone, address_msg)
+
     event = await calendar.create_appointment(
         slot,
         conv.collected_name or conv.user_display_name or "Cliente",
