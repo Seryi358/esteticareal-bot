@@ -75,31 +75,46 @@ async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
     now = datetime.now(COLOMBIA_TZ)
     end_range = now + timedelta(days=days_ahead)
 
-    # Fetch busy times from Google Calendar (run blocking call in thread with timeout)
+    # Fetch actual events from Google Calendar (more reliable than freebusy)
     try:
-        body = {
-            "timeMin": now.isoformat(),
-            "timeMax": end_range.isoformat(),
-            "items": [{"id": settings.google_calendar_id}],
-        }
+        cal_id = settings.google_calendar_id
         loop = asyncio.get_event_loop()
-        freebusy = await asyncio.wait_for(
-            loop.run_in_executor(None, lambda: service.freebusy().query(body=body).execute()),
+
+        def _fetch_events():
+            events_result = service.events().list(
+                calendarId=cal_id,
+                timeMin=now.isoformat(),
+                timeMax=end_range.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            ).execute()
+            return events_result.get("items", [])
+
+        events = await asyncio.wait_for(
+            loop.run_in_executor(None, _fetch_events),
             timeout=15,
         )
-        busy_periods = freebusy["calendars"][settings.google_calendar_id]["busy"]
+        logger.info(f"Calendar events found: {len(events)} in range")
+        for ev in events:
+            ev_start = ev.get("start", {}).get("dateTime", ev.get("start", {}).get("date", "?"))
+            logger.info(f"  Event: '{ev.get('summary', 'Sin titulo')}' @ {ev_start}")
     except asyncio.TimeoutError:
-        logger.error("Timeout fetching freebusy from Google Calendar")
+        logger.error("Timeout fetching events from Google Calendar")
         return []
     except Exception as e:
-        logger.error(f"Error fetching freebusy: {e}")
+        logger.error(f"Error fetching calendar events: {e}")
         return []
 
-    # Build busy intervals as datetime tuples
+    # Build busy intervals from events
     busy_intervals = []
-    for period in busy_periods:
-        start = datetime.fromisoformat(period["start"]).astimezone(COLOMBIA_TZ)
-        end = datetime.fromisoformat(period["end"]).astimezone(COLOMBIA_TZ)
+    for ev in events:
+        ev_start = ev.get("start", {})
+        ev_end = ev.get("end", {})
+        # Skip all-day events (they have "date" instead of "dateTime")
+        if "dateTime" not in ev_start:
+            continue
+        start = datetime.fromisoformat(ev_start["dateTime"]).astimezone(COLOMBIA_TZ)
+        end = datetime.fromisoformat(ev_end["dateTime"]).astimezone(COLOMBIA_TZ)
         busy_intervals.append((start, end))
 
     # Generate all potential slots

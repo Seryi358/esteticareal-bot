@@ -13,6 +13,57 @@ from services import ai, calendar, evolution
 logger = logging.getLogger(__name__)
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
+# Regex to strip emojis and special unicode symbols
+_EMOJI_RE = re.compile(
+    r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF"
+    r"\U0001F1E0-\U0001F1FF\U0001FA00-\U0001FAFF\U0001F900-\U0001F9FF"
+    r"\U00002702-\U000027B0\U0000FE00-\U0000FE0F\U0000200D\U00002600-\U000026FF"
+    r"\U00002700-\U000027BF\U0000231A-\U0000231B\U00002934-\U00002935"
+    r"\U000025AA-\U000025FE\U00002B05-\U00002B55\U00003030\U0000303D"
+    r"\U00003297\U00003299\U0000200B-\U0000200F\u2728\u2764\u2665\u2763"
+    r"\u270A-\u270D\u2744\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797"
+    r"\u27A1\u27B0\u27BF✨]+",
+    re.UNICODE,
+)
+
+
+def _clean_push_name(raw: str | None) -> str | None:
+    """
+    Extract a usable first name from a WhatsApp push name.
+    Returns None if the name is gibberish, emojis, single char, or a username.
+    """
+    if not raw:
+        return None
+
+    # Strip emojis, numbers, and special characters
+    cleaned = _EMOJI_RE.sub("", raw).strip()
+    # Remove numbers
+    cleaned = re.sub(r"\d+", "", cleaned).strip()
+    # Remove stray special characters but keep letters, spaces, accents
+    cleaned = re.sub(r"[^a-záéíóúñüA-ZÁÉÍÓÚÑÜ\s]", "", cleaned).strip()
+
+    if not cleaned or len(cleaned) < 2:
+        return None
+
+    # If it has spaces, take the first word (likely a real name)
+    if " " in cleaned:
+        parts = [p for p in cleaned.split() if len(p) >= 2]
+        if parts:
+            return parts[0].capitalize()
+        return None
+
+    # Single word — check if it looks like a real name or a username
+    # Usernames: all lowercase, very long, or look like concatenated words
+    if len(cleaned) > 12:
+        # Too long for a first name without spaces → probably a username
+        return None
+    if cleaned.islower() and len(cleaned) > 8:
+        # Long lowercase string → probably a username like "velasquezangie"
+        return None
+
+    # Reasonable single word — capitalize and use
+    return cleaned.capitalize()
+
 # ---------------------------------------------------------------------------
 # Debounce — accumulate rapid messages before processing
 # ---------------------------------------------------------------------------
@@ -36,6 +87,8 @@ async def process_message(
     media_base64_inline: str | None,
 ) -> None:
     """Main handler called from the webhook endpoint."""
+    # Clean the push name — extract a real first name or discard garbage
+    push_name = _clean_push_name(push_name)
     if push_name:
         _pending_names[phone] = push_name
 
