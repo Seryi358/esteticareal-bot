@@ -85,3 +85,8 @@ def save_conversation(conv: ConversationState) -> None:
     path = _conversation_path(conv.phone)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(conv.to_dict(), f, ensure_ascii=False, indent=2)
+
+    # Sync key fields to Supabase
+    from services.supabase import sync_conversation
+    nombre = conv.collected_name or conv.user_display_name
+    sync_conversation(conv.phone, nombre, conv.payment_verified)
