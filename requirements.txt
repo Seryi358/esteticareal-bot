@@ -10,4 +10,3 @@ google-api-python-client==2.154.0
 python-multipart==0.0.18
 python-dotenv==1.0.1
 aiofiles==24.1.0
-supabase==2.11.0

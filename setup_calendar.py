@@ -20,7 +20,10 @@ Resultado: Se crea credentials/token.json que el bot usa automaticamente.
 import os
 import sys
 
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 CREDENTIALS_FILE = "credentials/google_credentials.json"
 TOKEN_FILE = "credentials/token.json"
 

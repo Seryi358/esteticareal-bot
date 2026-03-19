@@ -19,9 +19,8 @@ class Settings(BaseSettings):
     google_calendar_id: str = "primary"
     google_token_json: str = ""  # base64-encoded token.json for production
 
-    # Supabase
-    supabase_url: str = ""
-    supabase_key: str = ""
+    # Google Sheets
+    google_sheet_id: str = ""
 
     # Paths
     conversations_dir: str = "data/conversations"

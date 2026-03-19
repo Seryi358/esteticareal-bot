@@ -12,7 +12,10 @@ from config import get_settings
 logger = logging.getLogger(__name__)
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
+SCOPES = [
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/spreadsheets",
+]
 
 # Business hours (local Colombia time)
 BUSINESS_HOURS_START = 9   # 9:00 AM
