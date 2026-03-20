@@ -23,7 +23,7 @@ def _get_service():
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
 
 
-def _sync(phone: str, nombre: str | None, pago_valoracion: bool) -> None:
+def _sync(phone: str, nombre: str | None, pago_valoracion: bool, pago_en_sitio: bool) -> None:
     """Upsert a row in the Google Sheet (runs in thread via asyncio)."""
     settings = get_settings()
     if not settings.google_sheet_id:
@@ -37,7 +37,15 @@ def _sync(phone: str, nombre: str | None, pago_valoracion: bool) -> None:
 
     sheet_id = settings.google_sheet_id
     now = datetime.now(COLOMBIA_TZ).strftime("%Y-%m-%d %H:%M")
-    new_row = [phone, nombre or "", "Sí" if pago_valoracion else "No", now]
+
+    if pago_valoracion:
+        pago_status = "Sí (Nequi)"
+    elif pago_en_sitio:
+        pago_status = "Pagará en sitio"
+    else:
+        pago_status = "No"
+
+    new_row = [phone, nombre or "", pago_status, now]
 
     try:
         # Read existing data to find if phone already exists
@@ -78,8 +86,10 @@ def _sync(phone: str, nombre: str | None, pago_valoracion: bool) -> None:
         logger.error(f"[Sheets] Error syncing {phone}: {e}")
 
 
-async def sync_conversation(phone: str, nombre: str | None, pago_valoracion: bool) -> None:
+async def sync_conversation(
+    phone: str, nombre: str | None, pago_valoracion: bool, pago_en_sitio: bool = False,
+) -> None:
     """Async wrapper — runs the blocking Sheets API call in a thread."""
     await asyncio.get_event_loop().run_in_executor(
-        None, partial(_sync, phone, nombre, pago_valoracion)
+        None, partial(_sync, phone, nombre, pago_valoracion, pago_en_sitio)
     )

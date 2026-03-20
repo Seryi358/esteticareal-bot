@@ -25,6 +25,8 @@ class ConversationState:
     collected_email: Optional[str] = None
     calendar_slots_json: Optional[str] = None  # JSON string of available slots
     appointment_datetime: Optional[str] = None
+    offered_pay_at_clinic: bool = False  # True after offering same-day payment
+    pay_at_clinic: bool = False  # True if user chose to pay at clinic instead of Nequi
     human_takeover: bool = False  # Legacy — kept for backward compat with saved JSONs
     human_takeover_until: Optional[str] = None  # ISO timestamp — bot silent until this time
     messages: list = field(default_factory=list)
@@ -90,4 +92,6 @@ def save_conversation(conv: ConversationState) -> None:
     # Sync key fields to Google Sheets
     from services.sheets import sync_conversation
     nombre = conv.collected_name or conv.user_display_name
-    asyncio.ensure_future(sync_conversation(conv.phone, nombre, conv.payment_verified))
+    asyncio.ensure_future(
+        sync_conversation(conv.phone, nombre, conv.payment_verified, conv.pay_at_clinic)
+    )

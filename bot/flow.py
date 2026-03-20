@@ -362,6 +362,10 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_collect_data_and_schedule(conv)
         return
 
+    if conv.phase == "awaiting_screenshot":
+        await _handle_payment_objection(conv, text)
+        return
+
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
 
@@ -380,6 +384,64 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     # Detect when Nequi payment instructions were given (fallback path)
     if "3006278237" in reply and conv.phase not in ("awaiting_screenshot", "collecting_data", "appointment_confirmed"):
         conv.phase = "awaiting_screenshot"
+
+
+# ---------------------------------------------------------------------------
+# Payment objection → offer pay at clinic
+# ---------------------------------------------------------------------------
+
+_OBJECTION_KEYWORDS = (
+    "no puedo", "no tengo", "prefiero", "después", "despues", "luego",
+    "caro", "efectivo", "en persona", "no quiero", "por qué", "por que",
+    "mejor no", "no sé", "no se", "pensarlo", "lo pienso", "mismo día",
+    "mismo dia", "cuando llegue", "allá pago", "alla pago", "mucho",
+    "no me convence", "seguro", "confianza", "desconfío", "desconfio",
+    "estafa", "no pago", "adelantado",
+)
+
+_ACCEPT_KEYWORDS = (
+    "sí", "si", "dale", "listo", "perfecto", "bueno", "ok", "está bien",
+    "esta bien", "vale", "claro", "eso", "mejor", "allá", "alla",
+    "en persona", "mismo día", "mismo dia", "presencial", "cuando llegue",
+    "de una", "va", "hecho", "genial",
+)
+
+
+async def _handle_payment_objection(conv: ConversationState, text: str) -> None:
+    """Handle text messages while waiting for payment screenshot.
+
+    If the user objects to paying upfront, offer same-day payment at the clinic.
+    If they already got the offer and accept, skip payment and proceed to data collection.
+    """
+    text_lower = text.lower().strip()
+
+    # User already got the same-day offer → check if they accept
+    if conv.offered_pay_at_clinic:
+        if any(k in text_lower for k in _ACCEPT_KEYWORDS):
+            conv.pay_at_clinic = True
+            conv.phase = "collecting_data"
+            conv.inject_system_event(
+                "PAY_AT_CLINIC_ACCEPTED: El usuario acepto pagar los $25.000 el mismo dia "
+                "de la cita en el consultorio. "
+                "Ahora pide su nombre completo y celular para confirmar la cita."
+            )
+            reply = await _generate_reply(conv)
+            await _send_and_record(conv, reply)
+            return
+
+    # Detect payment objection → offer same-day payment
+    if not conv.offered_pay_at_clinic and any(k in text_lower for k in _OBJECTION_KEYWORDS):
+        conv.offered_pay_at_clinic = True
+        conv.inject_system_event(
+            "PAYMENT_OBJECTION: El usuario tiene dudas sobre pagar por adelantado. "
+            "Ofrécele que puede pagar los $25.000 el mismo día cuando llegue al consultorio. "
+            "Dilo natural y tranquilizador — que lo importante es que no pierda su cupo. "
+            "NO insistas en el Nequi."
+        )
+
+    # Default: generate normal reply (handles "ya pagué" messages, random questions, etc.)
+    reply = await _generate_reply(conv)
+    await _send_and_record(conv, reply)
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +711,7 @@ async def _notify_yesica_appointment(
         f"*Teléfono:* +{conv.collected_phone or conv.phone}\n"
         f"*WhatsApp:* +{conv.phone}\n"
         f"*Tratamiento:* {conv.service_interest or 'No especificado'}\n"
-        f"*Valoración pagada:* Sí — $25.000\n"
+        f"*Valoración:* {'⚠️ Pagará $25.000 en el consultorio' if conv.pay_at_clinic else 'Sí — $25.000 pagados'}\n"
         f"*Fecha:* {appointment_dt}\n\n"
         f"Quedó registrado en tu Google Calendar 📅"
     )
