@@ -22,6 +22,15 @@ class Settings(BaseSettings):
     # Google Sheets
     google_sheet_id: str = ""
 
+    # Media assets — public URLs for before/after photos and videos
+    # Leave empty until Yésica provides the actual files
+    media_gluteos_url: str = ""         # Before/after photo — glúteos
+    media_reduccion_url: str = ""       # Before/after photo — reducción de medidas
+    media_facial_url: str = ""          # Before/after photo — limpieza facial
+    media_consultorio_url: str = ""     # Photo of the consultorio
+    media_video_yesica_url: str = ""    # Yésica presentation video (30-45 sec)
+    media_video_proceso_url: str = ""   # Treatment process video (20-30 sec)
+
     # Paths
     conversations_dir: str = "data/conversations"
     credentials_dir: str = "credentials"

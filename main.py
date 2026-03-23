@@ -1,4 +1,5 @@
 import asyncio
+import glob
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -9,11 +10,14 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from bot.conversation import load_conversation, save_conversation
-from bot.flow import process_message
+from bot.flow import process_message, send_followup_if_needed
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
 TAKEOVER_WINDOW_MINUTES = 5
+
+# Follow-up scheduler interval (seconds) — check every 4 hours
+FOLLOWUP_CHECK_INTERVAL = 4 * 60 * 60
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,12 +29,43 @@ logger = logging.getLogger(__name__)
 RESUME_BOT_COMMAND = "!bot"
 
 
+# ---------------------------------------------------------------------------
+# Background scheduler — 24h follow-ups
+# ---------------------------------------------------------------------------
+
+async def _followup_scheduler():
+    """Background loop: checks inactive conversations every 4h and sends follow-ups."""
+    # Wait 60s after startup before first check
+    await asyncio.sleep(60)
+    while True:
+        try:
+            conversations_dir = "data/conversations"
+            sent = 0
+            checked = 0
+            for filepath in glob.glob(os.path.join(conversations_dir, "*.json")):
+                phone = os.path.basename(filepath).replace(".json", "")
+                checked += 1
+                try:
+                    if await send_followup_if_needed(phone):
+                        sent += 1
+                except Exception as e:
+                    logger.error(f"Follow-up error for {phone}: {e}")
+            if sent > 0:
+                logger.info(f"Follow-up scheduler: {checked} checked, {sent} sent")
+        except Exception as e:
+            logger.error(f"Follow-up scheduler error: {e}")
+        await asyncio.sleep(FOLLOWUP_CHECK_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs("data/conversations", exist_ok=True)
     os.makedirs("credentials", exist_ok=True)
-    logger.info("Estetica Real Bot arrancado correctamente")
+    logger.info("Estetica Real Bot (Valen v3) arrancado correctamente")
+    # Start follow-up scheduler as background task
+    followup_task = asyncio.create_task(_followup_scheduler())
     yield
+    followup_task.cancel()
     logger.info("Bot detenido")
 
 
@@ -41,7 +76,26 @@ app = FastAPI(title="Estetica Real WhatsApp Bot", lifespan=lifespan)
 async def health():
     from services.calendar import _get_credentials
     cal_ok = _get_credentials() is not None
-    return {"status": "ok", "bot": "Estetica Real", "calendar": "connected" if cal_ok else "error"}
+    return {"status": "ok", "bot": "Estetica Real — Valen", "calendar": "connected" if cal_ok else "error"}
+
+
+@app.post("/check-followups")
+async def check_followups():
+    """Manual trigger for follow-up checks (also runs automatically every 4h)."""
+    conversations_dir = "data/conversations"
+    sent = 0
+    checked = 0
+
+    for filepath in glob.glob(os.path.join(conversations_dir, "*.json")):
+        phone = os.path.basename(filepath).replace(".json", "")
+        checked += 1
+        try:
+            if await send_followup_if_needed(phone):
+                sent += 1
+        except Exception as e:
+            logger.error(f"Follow-up error for {phone}: {e}")
+
+    return {"status": "ok", "checked": checked, "followups_sent": sent}
 
 
 @app.post("/webhook")

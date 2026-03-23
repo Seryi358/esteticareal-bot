@@ -57,6 +57,42 @@ def is_bot_sent_message(message_id: str) -> bool:
     return message_id in _bot_sent_ids
 
 
+async def send_media_message(
+    phone: str,
+    media_url: str,
+    media_type: str = "image",
+    caption: str = "",
+) -> bool:
+    """Send an image or video via Evolution API.
+
+    media_type: 'image' or 'video'
+    media_url: publicly accessible URL of the media file
+    """
+    url = f"{_base_url()}/message/sendMedia/{_instance()}"
+    payload = {
+        "number": phone,
+        "mediatype": media_type,
+        "media": media_url,
+        "delay": 1200,
+    }
+    if caption:
+        payload["caption"] = caption
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload, headers=_headers())
+            response.raise_for_status()
+            data = response.json()
+            msg_id = data.get("key", {}).get("id")
+            if msg_id:
+                _bot_sent_ids.add(msg_id)
+                if len(_bot_sent_ids) > _MAX_SENT_IDS:
+                    _bot_sent_ids.clear()
+            return True
+    except Exception as e:
+        logger.error(f"Error sending media to {phone}: {e}")
+        return False
+
+
 async def send_typing_presence(phone: str) -> None:
     """Send 'typing...' presence indicator for a more human feel."""
     url = f"{_base_url()}/chat/sendPresence/{_instance()}"

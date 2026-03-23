@@ -10,6 +10,33 @@ from bot.prompts import SYSTEM_PROMPT
 from config import get_settings
 from services import ai, calendar, evolution
 
+# Media assets — configured via environment variables
+# Maps media keys to URLs. Empty = not configured (skip sending).
+_MEDIA_ASSETS: dict[str, dict] = {}
+
+def _load_media_assets() -> dict[str, dict]:
+    """Load media asset URLs from settings. Called lazily."""
+    global _MEDIA_ASSETS
+    if _MEDIA_ASSETS:
+        return _MEDIA_ASSETS
+    settings = get_settings()
+    # Each asset: {"url": "https://...", "type": "image"|"video", "caption": "..."}
+    assets = {}
+    if getattr(settings, "media_gluteos_url", ""):
+        assets["gluteos"] = {"url": settings.media_gluteos_url, "type": "image"}
+    if getattr(settings, "media_reduccion_url", ""):
+        assets["reduccion"] = {"url": settings.media_reduccion_url, "type": "image"}
+    if getattr(settings, "media_facial_url", ""):
+        assets["facial"] = {"url": settings.media_facial_url, "type": "image"}
+    if getattr(settings, "media_consultorio_url", ""):
+        assets["consultorio"] = {"url": settings.media_consultorio_url, "type": "image"}
+    if getattr(settings, "media_video_yesica_url", ""):
+        assets["video_yesica"] = {"url": settings.media_video_yesica_url, "type": "video"}
+    if getattr(settings, "media_video_proceso_url", ""):
+        assets["video_proceso"] = {"url": settings.media_video_proceso_url, "type": "video"}
+    _MEDIA_ASSETS = assets
+    return assets
+
 logger = logging.getLogger(__name__)
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
@@ -225,6 +252,7 @@ async def _handle_audio(
 
     if transcription:
         logger.info(f"[{conv.phone}] Whisper transcription: '{transcription[:100]}'")
+        conv.last_user_message_at = datetime.now(COLOMBIA_TZ).isoformat()
         await _handle_text(conv, transcription)
     else:
         logger.warning(f"[{conv.phone}] Whisper returned empty transcription")
@@ -245,6 +273,9 @@ async def _handle_image(
     media_key_id: str | None,
     media_base64_inline: str | None,
 ) -> None:
+    # Track timestamp for follow-up system
+    conv.last_user_message_at = datetime.now(COLOMBIA_TZ).isoformat()
+
     # Get base64 of the image
     base64_data = media_base64_inline
     if not base64_data and media_key_id:
@@ -353,6 +384,8 @@ async def _handle_image(
 
 async def _handle_text(conv: ConversationState, text: str) -> None:
     conv.add_message("user", text)
+    # Track timestamp for 24h follow-up system
+    conv.last_user_message_at = datetime.now(COLOMBIA_TZ).isoformat()
 
     if conv.phase == "awaiting_slot_selection":
         await _try_parse_slot_selection(conv, text)
@@ -605,7 +638,8 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
 # ---------------------------------------------------------------------------
 
 async def _send_and_record(conv: ConversationState, reply: str) -> None:
-    """Split reply by [MSG], send each part as a separate WhatsApp message."""
+    """Split reply by [MSG], send each part as a separate WhatsApp message.
+    Also detects media triggers and sends configured media assets."""
     parts = [p.strip() for p in reply.split("[MSG]") if p.strip()]
 
     if not parts:
@@ -614,12 +648,114 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
     full_reply = " ".join(parts)  # Store as single string in history
     conv.add_message("assistant", full_reply)
 
+    # Detect if we should send media based on conversation context
+    await _maybe_send_media(conv, full_reply)
+
     for i, part in enumerate(parts):
         await evolution.send_typing_presence(conv.phone)
         # Delay between messages scaled to message length (more human)
         delay = min(1.0 + len(part) * 0.015, 3.5)
         await asyncio.sleep(delay)
         await evolution.send_text_message(conv.phone, part)
+
+
+# ---------------------------------------------------------------------------
+# Media sending — before/after photos, videos at key conversation moments
+# ---------------------------------------------------------------------------
+
+async def _maybe_send_media(conv: ConversationState, reply_text: str) -> None:
+    """Detect conversation context and send relevant media (photos/videos) if configured."""
+    assets = _load_media_assets()
+    if not assets:
+        return  # No media configured — skip
+
+    reply_lower = reply_text.lower()
+    service = (conv.service_interest or "").lower()
+
+    # Stage 3 triggers: when presenting service with social proof (antes/después)
+    antes_despues_triggers = (
+        "así le quedó", "asi le quedo", "antes y después", "antes/después",
+        "sus resultados después", "estos son sus cambios",
+    )
+    if any(t in reply_lower for t in antes_despues_triggers):
+        # Determine which before/after to send based on service interest
+        media_key = None
+        if any(w in service for w in ("glúteo", "gluteo", "levantamiento", "moldeo")):
+            media_key = "gluteos"
+        elif any(w in service for w in ("reducción", "reduccion", "medida", "abdomen", "celulitis")):
+            media_key = "reduccion"
+        elif any(w in service for w in ("facial", "hidrofacial", "limpieza", "piel")):
+            media_key = "facial"
+
+        if media_key and media_key in assets:
+            asset = assets[media_key]
+            await evolution.send_media_message(
+                conv.phone, asset["url"], asset["type"],
+            )
+            logger.info(f"[{conv.phone}] Sent before/after media: {media_key}")
+            return
+
+    # Video of Yésica — when client asks who does the treatment or shows doubt
+    video_triggers = ("conocer a yésica", "conocer a yesica", "quién hace", "quien hace")
+    if any(t in reply_lower for t in video_triggers) and "video_yesica" in assets:
+        asset = assets["video_yesica"]
+        await evolution.send_media_message(conv.phone, asset["url"], asset["type"])
+        logger.info(f"[{conv.phone}] Sent Yésica presentation video")
+        return
+
+    # Photo of consultorio — when giving address or client asks about location
+    consultorio_triggers = ("cra 49b", "ciudad central", "estación madera", "estacion madera")
+    if any(t in reply_lower for t in consultorio_triggers) and "consultorio" in assets:
+        asset = assets["consultorio"]
+        await evolution.send_media_message(conv.phone, asset["url"], asset["type"])
+        logger.info(f"[{conv.phone}] Sent consultorio photo")
+
+
+# ---------------------------------------------------------------------------
+# 24h Follow-up system
+# ---------------------------------------------------------------------------
+
+async def send_followup_if_needed(phone: str) -> bool:
+    """Check if this conversation needs a 24h follow-up and send it.
+    Returns True if a follow-up was sent."""
+    conv = load_conversation(phone)
+
+    # Skip if already sent, or if appointment confirmed, or no last message
+    if conv.follow_up_sent:
+        return False
+    if conv.phase in ("appointment_confirmed", "collecting_data"):
+        return False
+    if not conv.last_user_message_at:
+        return False
+    if conv.is_human_takeover_active():
+        return False
+
+    try:
+        last_msg = datetime.fromisoformat(conv.last_user_message_at).replace(tzinfo=COLOMBIA_TZ)
+    except Exception:
+        return False
+
+    now = datetime.now(COLOMBIA_TZ)
+    hours_elapsed = (now - last_msg).total_seconds() / 3600
+
+    # Send between 20-48 hours after last message
+    if hours_elapsed < 20 or hours_elapsed > 48:
+        return False
+
+    name = conv.user_display_name or ""
+    greeting = f"Hola {name}" if name else "Hola"
+    followup_msg = (
+        f"{greeting} ✨ Te escribo porque Yésica tiene disponibilidad esta semana "
+        f"y quería avisarte antes de que se llenen los cupos. Si tenés alguna duda "
+        f"sobre el precio, el proceso o cómo llegar, cuéntame y la resolvemos ahorita."
+    )
+
+    await evolution.send_text_message(phone, followup_msg)
+    conv.follow_up_sent = True
+    conv.add_message("assistant", followup_msg)
+    save_conversation(conv)
+    logger.info(f"[{phone}] Sent 24h follow-up message")
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -646,7 +782,7 @@ async def _generate_reply(conv: ConversationState) -> str:
             f"En mensajes siguientes usalo de vez en cuando.\n"
         )
     else:
-        header += "NOMBRE DEL USUARIO: Desconocido — usa 'amor' o 'chica' y pregunta su nombre naturalmente.\n"
+        header += "NOMBRE DEL USUARIO: Desconocido — usa 'hola' simple y pregunta su nombre naturalmente. NO uses 'amiga', 'amor' ni emojis como sustituto.\n"
 
     system_with_context = header + "\n" + SYSTEM_PROMPT
 
@@ -664,7 +800,7 @@ async def _generate_reply(conv: ConversationState) -> str:
     else:
         messages.append({
             "role": "system",
-            "content": "RECORDATORIO: No sabes el nombre del usuario. Usa 'amor' o 'chica' y pregunta cómo se llama."
+            "content": "RECORDATORIO: No sabes el nombre del usuario. Usa 'hola' simple y pregunta cómo se llama de forma natural. NO uses 'amiga' ni 'amor' como sustituto."
         })
 
     return await ai.chat(messages)

@@ -1,7 +1,7 @@
 import asyncio
 import json
 import os
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, fields, asdict
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -29,6 +29,8 @@ class ConversationState:
     pay_at_clinic: bool = False  # True if user chose to pay at clinic instead of Nequi
     human_takeover: bool = False  # Legacy — kept for backward compat with saved JSONs
     human_takeover_until: Optional[str] = None  # ISO timestamp — bot silent until this time
+    last_user_message_at: Optional[str] = None  # ISO timestamp — for 24h follow-up
+    follow_up_sent: bool = False  # True after automatic 24h follow-up sent
     messages: list = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -36,7 +38,10 @@ class ConversationState:
 
     @classmethod
     def from_dict(cls, data: dict) -> "ConversationState":
-        return cls(**data)
+        # Filter to only known fields — allows old/new JSON files to load safely
+        known = {f.name for f in fields(cls)}
+        filtered = {k: v for k, v in data.items() if k in known}
+        return cls(**filtered)
 
     def add_message(self, role: str, content: str) -> None:
         self.messages.append({"role": role, "content": content})
