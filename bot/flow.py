@@ -485,9 +485,8 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         ):
             logger.info(f"Bot slot trigger detected for {conv.phone}")
             await _fetch_and_inject_slots(conv)
-            if conv.phase == "awaiting_slot_selection":
-                slot_reply = await _generate_reply(conv)
-                await _send_and_record(conv, slot_reply)
+            slot_reply = await _generate_reply(conv)
+            await _send_and_record(conv, slot_reply)
         return
 
 
