@@ -764,16 +764,13 @@ def _ensure_conversation_alive(reply: str) -> str:
     if any(p in reply_lower for p in continuation_phrases):
         return reply
 
-    # No question and no continuation — add a natural follow-up
-    # Pick based on conversation context
-    if any(w in reply_lower for w in ("valoración", "valoracion", "cita", "agendar")):
-        return reply + " ¿Te gustaría agendar?"
-    elif any(w in reply_lower for w in ("tratamiento", "glúteos", "gluteos", "resultado")):
-        return reply + " ¿Quieres saber más?"
-    elif any(w in reply_lower for w in ("instagram", "instagram.com")):
+    # No question and no continuation — add a follow-up oriented to scheduling
+    if any(w in reply_lower for w in ("instagram", "instagram.com")):
         return reply  # Instagram links are ok without question (user is out of zone)
+    elif any(w in reply_lower for w in ("valoración", "valoracion", "cita", "agendar", "horario")):
+        return reply + " ¿Quieres que te busque un horario?"
     else:
-        return reply + " ¿Qué te gustaría saber?"
+        return reply + " ¿Te gustaría conocer más sobre cómo funciona?"
 
 
 # ---------------------------------------------------------------------------
