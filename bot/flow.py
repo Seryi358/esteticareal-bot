@@ -542,8 +542,8 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
 
 async def _send_and_record(conv: ConversationState, reply: str) -> None:
     """Split reply by [MSG], send each part as a separate WhatsApp message."""
-    # Safety net: ensure response never dies without a question/continuation
-    reply = _ensure_conversation_alive(reply)
+    # Safety net: ensure response never dies before appointment is confirmed
+    reply = _ensure_conversation_alive(reply, conv.phase)
 
     parts = [p.strip() for p in reply.split("[MSG]") if p.strip()]
     if not parts:
@@ -559,10 +559,19 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
         await evolution.send_text_message(conv.phone, part)
 
 
-def _ensure_conversation_alive(reply: str) -> str:
-    """Minimal safety net — only catches empty responses. GPT handles the rest."""
+def _ensure_conversation_alive(reply: str, phase: str) -> str:
+    """Safety net: before appointment is confirmed, ensure reply has a question."""
     if not reply or not reply.strip():
         return "¿En qué te puedo ayudar?"
+
+    # After appointment confirmed or escalated — don't force questions
+    if phase in ("appointment_confirmed", "escalated_to_yesica"):
+        return reply
+
+    # Before appointment: if no question mark, GPT forgot — add one
+    if "?" not in reply:
+        return reply + " ¿Qué te parece?"
+
     return reply
 
 
