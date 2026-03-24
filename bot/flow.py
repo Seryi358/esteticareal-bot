@@ -505,12 +505,6 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     """User is picking a time slot. Parse and proceed to data collection."""
-    # Check if this is actually an evening request
-    text_lower = text.lower()
-    if any(t in text_lower for t in _EVENING_TRIGGERS):
-        await _escalate_to_yesica_evening(conv, text)
-        return
-
     if not conv.calendar_slots_json:
         await _fetch_and_inject_slots(conv)
         reply = await _generate_reply(conv)
