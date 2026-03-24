@@ -105,6 +105,45 @@ async def transcribe_audio(base64_audio: str) -> str | None:
         return None
 
 
+async def parse_slot_selection(user_message: str, available_slots: list[str], current_datetime: str) -> str | None:
+    """Use GPT to understand which slot the user wants from their natural language.
+    Returns the ISO datetime string of the selected slot, or None."""
+    prompt = f"""El usuario está eligiendo un horario para una cita. Analiza su mensaje y selecciona el horario más apropiado de la lista disponible.
+
+Fecha y hora actual: {current_datetime}
+
+Horarios disponibles (formato ISO):
+{chr(10).join(f'- {s}' for s in available_slots[:30])}
+
+Mensaje del usuario: "{user_message}"
+
+Responde ÚNICAMENTE con el JSON:
+{{"selected": "ISO_DATETIME_EXACTO_DE_LA_LISTA" }}
+
+Si el usuario no está eligiendo un horario o no puedes determinar cuál quiere, responde:
+{{"selected": null}}
+
+IMPORTANTE: Solo puedes elegir horarios que estén EN LA LISTA. No inventes horarios."""
+
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=100,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
+        result = json.loads(raw)
+        selected = result.get("selected")
+        if selected and selected in available_slots:
+            return selected
+        return None
+    except Exception as e:
+        logger.error(f"Slot parsing error: {e}")
+        return None
+
+
 async def extract_user_data(messages: list[dict]) -> dict:
     """Extract structured user data (name, phone, email) from recent conversation messages."""
     recent = messages[-10:] if len(messages) > 10 else messages

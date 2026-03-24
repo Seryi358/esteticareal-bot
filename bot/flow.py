@@ -504,44 +504,42 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
 # ---------------------------------------------------------------------------
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
-    """User is picking a time slot. Parse and proceed to data collection."""
+    """User is picking a time slot. GPT parses the selection."""
     if not conv.calendar_slots_json:
         await _fetch_and_inject_slots(conv)
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
 
-    slots = [
-        datetime.fromisoformat(s).replace(tzinfo=COLOMBIA_TZ)
-        for s in json.loads(conv.calendar_slots_json)
-    ]
+    available_slots = json.loads(conv.calendar_slots_json)
+    now_str = datetime.now(COLOMBIA_TZ).strftime("%A %d/%m/%Y %I:%M %p")
 
-    selected_slot = _extract_slot_from_text(text, slots)
+    # Let GPT understand what slot the user wants
+    selected_iso = await ai.parse_slot_selection(text, available_slots, now_str)
 
-    if selected_slot:
+    if selected_iso:
+        selected_slot = datetime.fromisoformat(selected_iso).replace(tzinfo=COLOMBIA_TZ)
         formatted_dt = _format_appointment_datetime(selected_slot)
         conv.appointment_datetime = selected_slot.isoformat()
+        logger.info(f"[{conv.phone}] GPT parsed slot: {formatted_dt}")
 
-        # Check if we already have enough data to create appointment
         has_name = conv.collected_name or conv.user_display_name
         if has_name:
-            # Go directly to appointment creation
             conv.phase = "collecting_data"
             await _try_collect_data_and_schedule(conv)
             return
         else:
-            # Need to collect name
             conv.phase = "collecting_data"
             conv.inject_system_event(
-                f"El usuario eligio el horario: {formatted_dt}. "
-                f"Ahora necesitás su nombre completo para confirmar la cita. "
-                f"Pidelo de forma natural y breve."
+                f"El usuario eligió el horario: {formatted_dt}. "
+                f"Necesitas su nombre completo para confirmar la cita. "
+                f"Pídelo de forma natural."
             )
     else:
+        # GPT couldn't parse — let the conversation flow naturally
         conv.inject_system_event(
-            "INSTRUCCION: No se pudo identificar el horario que el usuario quiere. "
-            "Preguntale de forma natural qué día y hora le queda mejor, "
-            "por ejemplo: 'mañana a las 10am' o 'el jueves a las 2pm'."
+            "INSTRUCCION: El usuario respondió pero no se identificó un horario claro. "
+            "Pregunta de forma natural qué día y hora le queda mejor."
         )
 
     reply = await _generate_reply(conv)
@@ -709,30 +707,10 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
 
 
 def _ensure_conversation_alive(reply: str) -> str:
-    """Guarantee every response has a question or continuation. Never let conversation die."""
+    """Minimal safety net — only catches empty responses. GPT handles the rest."""
     if not reply or not reply.strip():
         return "¿En qué te puedo ayudar?"
-
-    # Check if reply already has a question mark
-    if "?" in reply:
-        return reply
-
-    # Check if reply has a continuation phrase
-    continuation_phrases = (
-        "cuéntame", "cuentame", "dime", "escríbeme", "escribeme",
-        "avísame", "avisame", "me cuentas",
-    )
-    reply_lower = reply.lower()
-    if any(p in reply_lower for p in continuation_phrases):
-        return reply
-
-    # No question and no continuation — add a follow-up oriented to scheduling
-    if any(w in reply_lower for w in ("instagram", "instagram.com")):
-        return reply  # Instagram links are ok without question (user is out of zone)
-    elif any(w in reply_lower for w in ("valoración", "valoracion", "cita", "agendar", "horario")):
-        return reply + " ¿Quieres que te busque un horario?"
-    else:
-        return reply + " ¿Te gustaría conocer más sobre cómo funciona?"
+    return reply
 
 
 # ---------------------------------------------------------------------------
@@ -888,98 +866,7 @@ async def _notify_yesica_appointment(
 # Slot extraction from natural language
 # ---------------------------------------------------------------------------
 
-def _extract_slot_from_text(text: str, slots: list[datetime]) -> datetime | None:
-    """Parse natural time references like 'mañana a las 10', 'el jueves a las 3pm'."""
-    if not slots:
-        return None
-
-    text_clean = text.strip().lower()
-    now = datetime.now(COLOMBIA_TZ)
-
-    # --- 1. Identify target DAY ---
-    target_date = None
-    if "hoy" in text_clean:
-        target_date = now.date()
-    elif "mañana" in text_clean or "manana" in text_clean:
-        target_date = (now + timedelta(days=1)).date()
-    else:
-        day_names = {
-            "lunes": 0, "martes": 1, "miercoles": 2, "miércoles": 2,
-            "jueves": 3, "viernes": 4,
-        }
-        for name, weekday in day_names.items():
-            if name in text_clean:
-                days_ahead = (weekday - now.weekday()) % 7
-                if days_ahead == 0:
-                    if any(s.date() == now.date() and s.weekday() == weekday for s in slots):
-                        target_date = now.date()
-                    else:
-                        target_date = (now + timedelta(days=7)).date()
-                else:
-                    target_date = (now + timedelta(days=days_ahead)).date()
-                break
-
-    # --- 2. Identify target HOUR ---
-    target_hour = None
-    target_minute = 0
-
-    time_match = re.search(
-        r'(?:a\s+las\s+|las\s+)?(\d{1,2})\s*(?::(\d{2}))?\s*(am|pm|a\.m\.|p\.m\.)?',
-        text_clean,
-    )
-    if time_match:
-        hour = int(time_match.group(1))
-        minute = int(time_match.group(2)) if time_match.group(2) else 0
-        period = time_match.group(3)
-
-        if period and period.startswith("p") and hour < 12:
-            hour += 12
-        elif period and period.startswith("a") and hour == 12:
-            hour = 0
-        elif not period and 1 <= hour <= 7:
-            hour += 12  # Assume PM for business hours
-
-        target_hour = hour
-        target_minute = minute
-
-    # Handle "en la mañana" / "en la tarde"
-    if target_hour is None:
-        if re.search(r"en la mañana|por la mañana|temprano|mañana(?! )", text_clean):
-            # Be careful: "mañana" can mean "tomorrow" — check context
-            if "mañana en la mañana" in text_clean or "mañana temprano" in text_clean:
-                target_hour = 9
-            elif "en la mañana" in text_clean or "por la mañana" in text_clean:
-                target_hour = 9
-        if re.search(r"en la tarde|por la tarde|tarde", text_clean):
-            target_hour = 14
-        if re.search(r"medio\s*d[ií]a|mediodia|12", text_clean):
-            target_hour = 12
-
-    # --- 3. Match against available slots ---
-    if target_date and target_hour is not None:
-        target_dt = datetime(
-            target_date.year, target_date.month, target_date.day,
-            target_hour, target_minute, tzinfo=COLOMBIA_TZ,
-        )
-        candidates = [s for s in slots if s.date() == target_date]
-        if candidates:
-            best = min(candidates, key=lambda s: abs((s - target_dt).total_seconds()))
-            if abs((best - target_dt).total_seconds()) <= 40 * 60:
-                return best
-
-    if target_hour is not None and target_date is None:
-        candidates = [s for s in slots if s.hour == target_hour]
-        if not candidates:
-            candidates = [s for s in slots if abs(s.hour - target_hour) <= 1]
-        if candidates:
-            return candidates[0]
-
-    if target_date and target_hour is None:
-        candidates = [s for s in slots if s.date() == target_date]
-        if candidates:
-            return candidates[0]
-
-    return None
+    # _extract_slot_from_text removed — GPT handles slot parsing via ai.parse_slot_selection
 
 
 def _contains_invented_time(reply: str) -> bool:
