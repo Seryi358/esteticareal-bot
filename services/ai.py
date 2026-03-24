@@ -141,22 +141,60 @@ async def extract_name_from_pushname(push_name: str) -> str | None:
 async def parse_slot_selection(user_message: str, available_slots: list[str], current_datetime: str) -> str | None:
     """Use GPT to understand which slot the user wants from their natural language.
     Returns the ISO datetime string of the selected slot, or None."""
-    prompt = f"""El usuario está eligiendo un horario para una cita. Analiza su mensaje y selecciona el horario más apropiado de la lista disponible.
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    COLOMBIA_TZ = ZoneInfo("America/Bogota")
+
+    days_es = {0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves", 4: "viernes", 5: "sabado", 6: "domingo"}
+
+    # Build human-readable list — pick first 3 slots per day to keep it compact but cover all days
+    from collections import defaultdict
+    slots_by_day = defaultdict(list)
+    for iso in available_slots:
+        day_key = iso[:10]  # "2026-03-27"
+        slots_by_day[day_key].append(iso)
+
+    slot_lines = []
+    for day_key in sorted(slots_by_day.keys()):
+        day_slots = slots_by_day[day_key]
+        # Include first, middle, and last slot of each day
+        indices = [0]
+        if len(day_slots) > 2:
+            indices.append(len(day_slots) // 2)
+        if len(day_slots) > 1:
+            indices.append(len(day_slots) - 1)
+        for idx in indices:
+            iso = day_slots[idx]
+            dt = datetime.fromisoformat(iso).replace(tzinfo=COLOMBIA_TZ)
+            day_name = days_es[dt.weekday()]
+            human = f"{day_name} {dt.day}/{dt.month} a las {dt.strftime('%I:%M %p').lstrip('0')}"
+            slot_lines.append(f"- {human} → ISO: {iso}")
+        # Also note total available
+        first_dt = datetime.fromisoformat(day_slots[0]).replace(tzinfo=COLOMBIA_TZ)
+        last_dt = datetime.fromisoformat(day_slots[-1]).replace(tzinfo=COLOMBIA_TZ)
+        day_name = days_es[first_dt.weekday()]
+        slot_lines.append(f"  ({day_name}: {len(day_slots)} slots de {first_dt.strftime('%I:%M %p').lstrip('0')} a {last_dt.strftime('%I:%M %p').lstrip('0')})")
+
+    prompt = f"""El usuario está eligiendo un horario para una cita. Analiza su mensaje y selecciona el horario más apropiado.
 
 Fecha y hora actual: {current_datetime}
 
-Horarios disponibles (formato ISO):
-{chr(10).join(f'- {s}' for s in available_slots[:30])}
+Horarios disponibles:
+{chr(10).join(slot_lines)}
 
 Mensaje del usuario: "{user_message}"
 
-Responde ÚNICAMENTE con el JSON:
-{{"selected": "ISO_DATETIME_EXACTO_DE_LA_LISTA" }}
+Responde SOLO con JSON. El valor de "selected" debe ser el ISO EXACTO de la lista:
+{{"selected": "2026-03-25T09:00:00-05:00"}}
 
-Si el usuario no está eligiendo un horario o no puedes determinar cuál quiere, responde:
+Si el usuario no está eligiendo un horario, responde:
 {{"selected": null}}
 
-IMPORTANTE: Solo puedes elegir horarios que estén EN LA LISTA. No inventes horarios."""
+REGLAS:
+- Solo puedes elegir un ISO que esté EN LA LISTA
+- Si dice "en la mañana" elige el primer slot antes de 12pm de ese día
+- Si dice "en la tarde" elige el primer slot de 12pm en adelante
+- Si dice solo un día sin hora, elige el primer slot disponible de ese día"""
 
     try:
         response = await get_client().chat.completions.create(
@@ -169,8 +207,33 @@ IMPORTANTE: Solo puedes elegir horarios que estén EN LA LISTA. No inventes hora
         raw = response.choices[0].message.content.strip()
         result = json.loads(raw)
         selected = result.get("selected")
-        if selected and selected in available_slots:
+        if not selected:
+            return None
+
+        # Exact match
+        if selected in available_slots:
+            logger.info(f"GPT slot selection: '{user_message}' → {selected}")
             return selected
+
+        # Fuzzy match — find closest slot to what GPT returned
+        try:
+            target = datetime.fromisoformat(selected).replace(tzinfo=COLOMBIA_TZ)
+            best = None
+            best_diff = float("inf")
+            for iso in available_slots:
+                slot_dt = datetime.fromisoformat(iso).replace(tzinfo=COLOMBIA_TZ)
+                diff = abs((slot_dt - target).total_seconds())
+                if diff < best_diff:
+                    best_diff = diff
+                    best = iso
+            # Accept if within 60 minutes (GPT sometimes picks nearby slots)
+            if best and best_diff <= 3600:
+                logger.info(f"GPT slot fuzzy match: '{user_message}' → {best} (diff={best_diff}s)")
+                return best
+        except Exception:
+            pass
+
+        logger.warning(f"GPT returned slot not in list: {selected}")
         return None
     except Exception as e:
         logger.error(f"Slot parsing error: {e}")

@@ -578,17 +578,18 @@ def _ensure_conversation_alive(reply: str, phase: str) -> str:
     if not reply or not reply.strip():
         return "¿En qué te puedo ayudar?"
 
-    # After appointment confirmed or escalated — don't force questions
-    if phase in ("appointment_confirmed", "escalated_to_yesica"):
+    # Don't add questions after: appointment confirmed, escalated, or out-of-zone (instagram link)
+    if phase in ("appointment_confirmed", "escalated_to_yesica", "collecting_data"):
         return reply
-
-    # If reply contains instagram link, it's an out-of-zone goodbye — don't add question
     if "instagram.com" in reply.lower():
         return reply
 
-    # Before appointment: if no question mark, GPT forgot — add one
+    # If GPT forgot a question before booking, add a natural one
     if "?" not in reply:
-        return reply + " ¿Te interesa?"
+        reply_lower = reply.lower()
+        if any(w in reply_lower for w in ("agendado", "confirmada", "cita", "registrada")):
+            return reply  # Confirmation messages don't need a question
+        return reply + " ¿Qué dices?"
 
     return reply
 
