@@ -20,7 +20,7 @@ _push_name_cache: dict[str, str | None] = {}
 # ---------------------------------------------------------------------------
 # Debounce — accumulate rapid messages before processing
 # ---------------------------------------------------------------------------
-DEBOUNCE_SECONDS = 3.0
+DEBOUNCE_SECONDS = 4.0  # Wait for user to finish typing multiple messages
 
 _pending_text: dict[str, list[str]] = {}
 _pending_names: dict[str, str] = {}
@@ -541,7 +541,9 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
 # ---------------------------------------------------------------------------
 
 async def _send_and_record(conv: ConversationState, reply: str) -> None:
-    """Split reply by [MSG], send each part as a separate WhatsApp message."""
+    """Send reply as WhatsApp messages with human-like timing."""
+    import random
+
     # Safety net: ensure response never dies before appointment is confirmed
     reply = _ensure_conversation_alive(reply, conv.phase)
 
@@ -553,8 +555,19 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
     conv.add_message("assistant", full_reply)
 
     for i, part in enumerate(parts):
+        # Show "typing..." indicator
         await evolution.send_typing_presence(conv.phone)
-        delay = min(1.0 + len(part) * 0.015, 3.5)
+
+        # Human-like delay: time to "read" the user's message + "type" the response
+        if i == 0:
+            # First message: simulate reading + thinking + typing
+            read_time = random.uniform(1.5, 3.0)  # Reading the user's message
+            type_time = min(len(part) * 0.03, 4.0)  # Typing speed ~33 chars/sec
+            delay = read_time + type_time
+        else:
+            # Follow-up messages: shorter pause, just typing
+            delay = random.uniform(1.0, 2.0) + min(len(part) * 0.02, 3.0)
+
         await asyncio.sleep(delay)
         await evolution.send_text_message(conv.phone, part)
 
