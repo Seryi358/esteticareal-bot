@@ -418,9 +418,13 @@ _USER_SCHEDULE_TRIGGERS = (
     "cuando me puedo ir", "quiero la cita", "sepárame", "separame",
     "quiero el cupo", "vamos pues", "listo dale", "agendame",
     "agéndame", "reservame", "resérvame", "quiero conocer",
-    "quiero saber más", "quiero saber mas", "me interesa la valoración",
-    "me interesa la valoracion", "quiero la valoracion gratuita",
-    "quiero la valoración gratuita", "sí me interesa", "si me interesa",
+    "me interesa la valoración", "me interesa la valoracion",
+    "quiero la valoracion gratuita", "quiero la valoración gratuita",
+    "sí me interesa", "si me interesa",
+    "busca un horario", "busca horario", "buscar horario",
+    "dale busca", "sí busca", "si busca", "dale agenda",
+    "si por favor", "sí por favor", "claro que sí", "claro que si",
+    "dale claro", "si claro", "sí claro",
 )
 
 # Phrases that indicate evening/night preference
@@ -467,7 +471,28 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
             return
 
     # Check if user is showing scheduling intent
-    if any(t in user_lower for t in _USER_SCHEDULE_TRIGGERS):
+    wants_to_schedule = any(t in user_lower for t in _USER_SCHEDULE_TRIGGERS)
+
+    # Also detect: if the bot just asked about scheduling and user says yes/dale/si/ok
+    if not wants_to_schedule:
+        last_bot_msg = ""
+        for msg in reversed(conv.messages):
+            if msg.get("role") == "assistant":
+                last_bot_msg = msg["content"].lower()
+                break
+        scheduling_question = any(w in last_bot_msg for w in (
+            "busque un horario", "buscar horario", "agendar", "agendamos",
+            "te agendo", "quieres que te busque",
+        ))
+        if scheduling_question:
+            affirmative = any(w in user_lower for w in (
+                "si", "sí", "dale", "ok", "listo", "claro", "bueno",
+                "perfecto", "va", "de una", "con toda", "porfa",
+            ))
+            if affirmative:
+                wants_to_schedule = True
+
+    if wants_to_schedule:
         if conv.phase not in (
             "awaiting_slot_selection", "collecting_data",
             "appointment_confirmed", "escalated_to_yesica",
