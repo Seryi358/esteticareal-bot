@@ -60,8 +60,9 @@ async def _followup_scheduler():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs("data/conversations", exist_ok=True)
+    os.makedirs("data/learning", exist_ok=True)
     os.makedirs("credentials", exist_ok=True)
-    logger.info("Estetica Real Bot (Valen v3) arrancado correctamente")
+    logger.info("Estetica Real Bot (Valen v4) arrancado correctamente")
     # Start follow-up scheduler as background task
     followup_task = asyncio.create_task(_followup_scheduler())
     yield
@@ -133,14 +134,23 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
             # This is a message our bot sent — ignore
             return JSONResponse({"status": "ignored", "reason": "own message"})
 
-        # Yesica typed this manually — handle human takeover
+        # Yesica typed/sent this manually — handle human takeover
         text_content = (
             message_obj.get("conversation")
             or message_obj.get("extendedTextMessage", {}).get("text", "")
         ).strip()
 
+        # Check if Yésica sent an audio
+        audio_base64 = None
+        audio_key_id = None
+        if "audioMessage" in message_obj or "pttMessage" in message_obj:
+            audio_obj = message_obj.get("audioMessage") or message_obj.get("pttMessage", {})
+            audio_base64 = audio_obj.get("base64")
+            audio_key_id = key.get("id") if not audio_base64 else None
+
         background_tasks.add_task(
-            _handle_yesica_intervention, phone, text_content
+            _handle_yesica_intervention, phone, text_content,
+            audio_base64=audio_base64, audio_key_id=audio_key_id,
         )
         return JSONResponse({"status": "yesica_intervention"})
 
@@ -174,13 +184,21 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
 # Yesica intervention handler
 # ---------------------------------------------------------------------------
 
-async def _handle_yesica_intervention(phone: str, text: str) -> None:
+async def _handle_yesica_intervention(
+    phone: str,
+    text: str,
+    audio_base64: str | None = None,
+    audio_key_id: str | None = None,
+) -> None:
     """
-    Called when Yesica manually types a message from the bot's WhatsApp.
+    Called when Yesica manually types/sends a message from the bot's WhatsApp.
     - Sets a 5-minute takeover window (bot stays silent).
     - Each new message from Yesica resets the 5-minute window.
     - If Yesica types !bot, immediately re-enables the bot.
+    - Saves Yesica's messages for learning (style adaptation).
     """
+    from bot.learning import save_yesica_message
+
     conv = load_conversation(phone)
 
     if text.lower() == RESUME_BOT_COMMAND:
@@ -188,16 +206,33 @@ async def _handle_yesica_intervention(phone: str, text: str) -> None:
         conv.human_takeover_until = None
         save_conversation(conv)
         logger.info(f"Bot re-enabled immediately for {phone} by Yesica (!bot)")
-    else:
-        until = datetime.now(COLOMBIA_TZ) + timedelta(minutes=TAKEOVER_WINDOW_MINUTES)
-        conv.human_takeover = True
-        conv.human_takeover_until = until.isoformat()
-        # Save Yesica's message in conversation history so the bot has full
-        # context when it resumes after the 5-minute window.
-        if text:
-            conv.add_message("assistant", text)
-        save_conversation(conv)
-        logger.info(f"Human takeover for {phone} — bot silent until {until.strftime('%H:%M:%S')}")
+        return
+
+    until = datetime.now(COLOMBIA_TZ) + timedelta(minutes=TAKEOVER_WINDOW_MINUTES)
+    conv.human_takeover = True
+    conv.human_takeover_until = until.isoformat()
+
+    # Handle Yésica's audio messages — transcribe and learn from them
+    if audio_base64 or audio_key_id:
+        try:
+            from services import ai as ai_service, evolution as evo_service
+            base64_data = audio_base64
+            if not base64_data and audio_key_id:
+                base64_data = await evo_service.get_media_base64(audio_key_id, phone=phone)
+            if base64_data:
+                transcription = await ai_service.transcribe_audio(base64_data)
+                if transcription:
+                    logger.info(f"Yésica audio transcription for {phone}: '{transcription[:100]}'")
+                    conv.add_message("assistant", transcription)
+                    save_yesica_message(phone, transcription, is_audio=True)
+        except Exception as e:
+            logger.error(f"Error transcribing Yésica's audio for {phone}: {e}")
+    elif text:
+        conv.add_message("assistant", text)
+        save_yesica_message(phone, text, is_audio=False)
+
+    save_conversation(conv)
+    logger.info(f"Human takeover for {phone} — bot silent until {until.strftime('%H:%M:%S')}")
 
 
 # ---------------------------------------------------------------------------

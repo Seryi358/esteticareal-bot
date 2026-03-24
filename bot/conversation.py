@@ -14,7 +14,7 @@ COLOMBIA_TZ = ZoneInfo("America/Bogota")
 @dataclass
 class ConversationState:
     phone: str
-    phase: str = "chatting"  # chatting | awaiting_screenshot | collecting_data | awaiting_slot_selection | appointment_confirmed
+    phase: str = "chatting"  # chatting | awaiting_slot_selection | collecting_data | appointment_confirmed | escalated_to_yesica
     user_display_name: Optional[str] = None
     service_interest: Optional[str] = None
     city: Optional[str] = None
@@ -26,7 +26,7 @@ class ConversationState:
     calendar_slots_json: Optional[str] = None  # JSON string of available slots
     appointment_datetime: Optional[str] = None
     offered_pay_at_clinic: bool = False  # True after offering same-day payment
-    pay_at_clinic: bool = False  # True if user chose to pay at clinic instead of Nequi
+    pay_at_clinic: bool = False  # Legacy field — kept for backward compat
     human_takeover: bool = False  # Legacy — kept for backward compat with saved JSONs
     human_takeover_until: Optional[str] = None  # ISO timestamp — bot silent until this time
     last_user_message_at: Optional[str] = None  # ISO timestamp — for 24h follow-up
@@ -95,8 +95,12 @@ def save_conversation(conv: ConversationState) -> None:
         json.dump(conv.to_dict(), f, ensure_ascii=False, indent=2)
 
     # Sync key fields to Google Sheets
-    from services.sheets import sync_conversation
-    nombre = conv.collected_name or conv.user_display_name
-    asyncio.ensure_future(
-        sync_conversation(conv.phone, nombre, conv.payment_verified, conv.pay_at_clinic)
-    )
+    try:
+        from services.sheets import sync_conversation
+        nombre = conv.collected_name or conv.user_display_name
+        is_booked = conv.phase == "appointment_confirmed"
+        asyncio.ensure_future(
+            sync_conversation(conv.phone, nombre, is_booked, False)
+        )
+    except Exception:
+        pass  # Don't let sheets sync failure break conversation saves

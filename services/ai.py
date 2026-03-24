@@ -24,10 +24,10 @@ async def chat(messages: list[dict]) -> str:
         response = await get_client().chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.85,
-            max_tokens=500,
+            temperature=0.1,
+            max_tokens=250,
             presence_penalty=0.3,
-            frequency_penalty=0.2,
+            frequency_penalty=0.3,
         )
         return response.choices[0].message.content.strip()
     except Exception as e:

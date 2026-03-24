@@ -21,7 +21,7 @@ SCOPES = [
 BUSINESS_HOURS_START = 9   # 9:00 AM
 BUSINESS_HOURS_END = 17    # 5:00 PM
 SLOT_DURATION_MINUTES = 30  # 30 min slots (2:00, 2:30, 3:00, etc.)
-BUSINESS_DAYS = {0, 1, 2, 3, 4, 5}  # Monday=0 to Saturday=5 (Sunday=6 excluded)
+BUSINESS_DAYS = {0, 1, 2, 3, 4}  # Monday=0 to Friday=4 (Saturday & Sunday excluded)
 
 
 def _get_credentials() -> Credentials | None:

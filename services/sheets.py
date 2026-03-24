@@ -39,11 +39,11 @@ def _sync(phone: str, nombre: str | None, pago_valoracion: bool, pago_en_sitio: 
     now = datetime.now(COLOMBIA_TZ).strftime("%Y-%m-%d %H:%M")
 
     if pago_valoracion:
-        pago_status = "Sí (Nequi)"
+        pago_status = "Cita agendada"
     elif pago_en_sitio:
-        pago_status = "Pagará en sitio"
+        pago_status = "Cita agendada"
     else:
-        pago_status = "No"
+        pago_status = "En conversación"
 
     new_row = [phone, nombre or "", pago_status, now]
 
