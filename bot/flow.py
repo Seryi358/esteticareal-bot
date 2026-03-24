@@ -631,8 +631,8 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
             )
     elif conv.appointment_datetime and not has_name:
         conv.inject_system_event(
-            "INSTRUCCION: Ya tenés el horario. Solo falta el nombre completo "
-            "para confirmar la cita. Pedilo de forma natural."
+            "INSTRUCCION: Ya tienes el horario. Solo falta el nombre completo "
+            "para confirmar la cita. Pídelo de forma natural."
         )
     else:
         logger.info(f"[{conv.phone}] No saved slot — fetching new slots")
@@ -856,7 +856,7 @@ async def _generate_reply(conv: ConversationState) -> str:
     name_reminder = (
         f"El usuario se llama {name}."
         if name else
-        "No sabés el nombre. Preguntá cómo se llama si es natural hacerlo."
+        "No sabes el nombre. Pregunta cómo se llama si es natural hacerlo."
     )
 
     messages.append({
