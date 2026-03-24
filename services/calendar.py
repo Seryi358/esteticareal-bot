@@ -240,6 +240,55 @@ def format_slots_for_whatsapp(slots: list[datetime]) -> str:
     return ", ".join(day_parts[:-1]) + " y " + day_parts[-1]
 
 
+def format_slots_detailed(slots: list[datetime]) -> str:
+    """Format slots with morning/afternoon breakdown per day for GPT context."""
+    if not slots:
+        return "No hay horarios disponibles."
+
+    days_es = {
+        0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves",
+        4: "viernes", 5: "sabado", 6: "domingo",
+    }
+    now = datetime.now(COLOMBIA_TZ)
+
+    # Group by day
+    from collections import defaultdict
+    by_day: dict[str, dict] = {}
+
+    for slot in slots:
+        if slot.date() == now.date():
+            label = "hoy"
+        elif slot.date() == (now + timedelta(days=1)).date():
+            label = "mañana"
+        else:
+            label = f"el {days_es[slot.weekday()]}"
+
+        if label not in by_day:
+            by_day[label] = {"mañana": [], "tarde": []}
+
+        if slot.hour < 12:
+            by_day[label]["mañana"].append(slot)
+        else:
+            by_day[label]["tarde"].append(slot)
+
+    parts = []
+    for day_label, franjas in list(by_day.items())[:5]:
+        morning = franjas["mañana"]
+        afternoon = franjas["tarde"]
+        detail = []
+        if morning:
+            detail.append(f"mañana ({_format_hour(morning[0])}-{_format_hour(morning[-1] + timedelta(minutes=SLOT_DURATION_MINUTES))})")
+        if afternoon:
+            detail.append(f"tarde ({_format_hour(afternoon[0])}-{_format_hour(afternoon[-1] + timedelta(minutes=SLOT_DURATION_MINUTES))})")
+        if not morning:
+            detail.append("mañana NO disponible")
+        if not afternoon:
+            detail.append("tarde NO disponible")
+        parts.append(f"{day_label}: {', '.join(detail)}")
+
+    return " | ".join(parts)
+
+
 async def create_appointment(
     slot: datetime,
     user_name: str,
