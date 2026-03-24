@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from bot.conversation import load_conversation, save_conversation
-from bot.flow import process_message, send_followup_if_needed
+from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
@@ -35,7 +35,6 @@ RESUME_BOT_COMMAND = "!bot"
 
 async def _followup_scheduler():
     """Background loop: checks inactive conversations every 4h and sends follow-ups."""
-    # Wait 60s after startup before first check
     await asyncio.sleep(60)
     while True:
         try:
@@ -57,16 +56,43 @@ async def _followup_scheduler():
         await asyncio.sleep(FOLLOWUP_CHECK_INTERVAL)
 
 
+# Reminder check interval — every 15 minutes
+REMINDER_CHECK_INTERVAL = 15 * 60
+
+
+async def _reminder_scheduler():
+    """Background loop: checks for upcoming appointments every 15min and sends reminders."""
+    await asyncio.sleep(120)  # Wait 2min after startup
+    while True:
+        try:
+            conversations_dir = "data/conversations"
+            sent = 0
+            for filepath in glob.glob(os.path.join(conversations_dir, "*.json")):
+                phone = os.path.basename(filepath).replace(".json", "")
+                try:
+                    if await send_reminder_if_needed(phone):
+                        sent += 1
+                except Exception as e:
+                    logger.error(f"Reminder error for {phone}: {e}")
+            if sent > 0:
+                logger.info(f"Reminder scheduler: {sent} reminders sent")
+        except Exception as e:
+            logger.error(f"Reminder scheduler error: {e}")
+        await asyncio.sleep(REMINDER_CHECK_INTERVAL)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     os.makedirs("data/conversations", exist_ok=True)
     os.makedirs("data/learning", exist_ok=True)
     os.makedirs("credentials", exist_ok=True)
     logger.info("Estetica Real Bot (Valen v4) arrancado correctamente")
-    # Start follow-up scheduler as background task
+    # Start background schedulers
     followup_task = asyncio.create_task(_followup_scheduler())
+    reminder_task = asyncio.create_task(_reminder_scheduler())
     yield
     followup_task.cancel()
+    reminder_task.cancel()
     logger.info("Bot detenido")
 
 

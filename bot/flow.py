@@ -633,6 +633,65 @@ async def send_followup_if_needed(phone: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Appointment reminder system (2h before)
+# ---------------------------------------------------------------------------
+
+async def send_reminder_if_needed(phone: str) -> bool:
+    """Check if this conversation has an upcoming appointment and send a reminder.
+    Sends reminder 2 hours before the appointment. Returns True if sent."""
+    conv = load_conversation(phone)
+
+    if conv.phase != "appointment_confirmed":
+        return False
+    if conv.reminder_sent:
+        return False
+    if not conv.appointment_datetime:
+        return False
+
+    try:
+        appointment = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+    except Exception:
+        return False
+
+    now = datetime.now(COLOMBIA_TZ)
+    time_until = (appointment - now).total_seconds()
+
+    # Send reminder between 1.5h and 2.5h before the appointment
+    if time_until < 5400 or time_until > 9000:  # 1.5h = 5400s, 2.5h = 9000s
+        return False
+
+    name = conv.user_display_name or conv.collected_name or ""
+    greeting = f"Hola {name}" if name else "Hola"
+    formatted_dt = _format_appointment_datetime(appointment)
+
+    # Send reminder to user
+    reminder_msg = (
+        f"{greeting}, te recuerdo que hoy tienes tu valoración con Yésica "
+        f"a las {appointment.strftime('%I:%M %p').lstrip('0')}. "
+        f"Te esperamos en la Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
+        f"(cerca de la Estación Madera del Metro). Llega unos minutos antes 😊"
+    )
+    await evolution.send_text_message(phone, reminder_msg)
+    conv.add_message("assistant", reminder_msg)
+
+    # Notify Yésica too
+    settings = get_settings()
+    yesica_msg = (
+        f"⏰ *Recordatorio de cita*\n\n"
+        f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
+        f"*WhatsApp:* +{phone}\n"
+        f"*Hora:* {appointment.strftime('%I:%M %p').lstrip('0')}\n"
+        f"*Servicio:* {conv.service_interest or 'Levantamiento de glúteos'}"
+    )
+    await evolution.send_text_message(settings.yesica_phone, yesica_msg)
+
+    conv.reminder_sent = True
+    save_conversation(conv)
+    logger.info(f"[{phone}] Sent appointment reminder (appointment at {formatted_dt})")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
