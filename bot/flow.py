@@ -401,52 +401,12 @@ async def _handle_image(
 
 
 # ---------------------------------------------------------------------------
-# Text handling
+# Text handling — GPT decides actions via tags
 # ---------------------------------------------------------------------------
 
-# Phrases that indicate user wants to schedule
-_USER_SCHEDULE_TRIGGERS = (
-    "quiero agendar", "quiero la valoración", "quiero la valoracion",
-    "quiero ir", "cómo agendo", "como agendo",
-    "cuándo puedo ir", "cuando puedo ir", "qué horarios", "que horarios",
-    "tienen disponibilidad", "hay disponibilidad", "cuándo hay",
-    "cuando hay", "para cuándo", "para cuando", "qué días", "que dias",
-    "quiero reservar", "quiero separar", "me gustaría agendar",
-    "me gustaria agendar", "dale sí", "dale si", "dale pues",
-    "va pues", "listo agendemos", "sí quiero", "si quiero",
-    "hagámosle", "hagamosle", "cuándo me puedo ir",
-    "cuando me puedo ir", "quiero la cita", "sepárame", "separame",
-    "quiero el cupo", "vamos pues", "listo dale", "agendame",
-    "agéndame", "reservame", "resérvame", "quiero conocer",
-    "me interesa la valoración", "me interesa la valoracion",
-    "quiero la valoracion gratuita", "quiero la valoración gratuita",
-    "sí me interesa", "si me interesa",
-    "busca un horario", "busca horario", "buscar horario",
-    "dale busca", "sí busca", "si busca", "dale agenda",
-    "si por favor", "sí por favor", "claro que sí", "claro que si",
-    "dale claro", "si claro", "sí claro",
-)
-
-# Phrases that indicate evening/night preference
-_EVENING_TRIGGERS = (
-    "en la noche", "por la noche", "después de las 5", "despues de las 5",
-    "después de las 6", "despues de las 6", "después de las 7", "despues de las 7",
-    "en la tarde noche", "tarde-noche", "solo puedo en la noche",
-    "7pm", "8pm", "9pm", "7 pm", "8 pm", "9 pm",
-    "después del trabajo", "despues del trabajo", "salgo a las 5",
-    "salgo a las 6", "fin de semana", "sábado", "sabado", "domingo",
-    "solo fines de semana", "solo los fines",
-)
-
-# Phrases from bot that trigger slot fetching
-_BOT_SLOT_TRIGGERS = (
-    "revisar la agenda", "revisar los horarios", "horarios disponibles",
-    "dejame revisar", "déjame revisar", "reviso los horarios",
-    "reviso la disponibilidad", "miro los horarios", "consulto los horarios",
-    "te busco horario", "busco disponibilidad", "reviso la agenda",
-    "miro la agenda", "chequeo la agenda", "verifico disponibilidad",
-    "darte un horario", "revisar disponibilidad",
-)
+# Tags that GPT includes in its response to trigger actions
+_TAG_CHECK_CALENDAR = "[REVISAR_AGENDA]"
+_TAG_EVENING = "[HORARIO_ESPECIAL]"
 
 
 async def _handle_text(conv: ConversationState, text: str) -> None:
@@ -462,71 +422,46 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_collect_data_and_schedule(conv)
         return
 
-    # Check if user wants evening/weekend (outside business hours)
-    user_lower = text.lower()
-    if any(t in user_lower for t in _EVENING_TRIGGERS):
-        if conv.phase not in ("appointment_confirmed", "escalated_to_yesica"):
-            logger.info(f"Evening/weekend request detected for {conv.phone}")
-            await _escalate_to_yesica_evening(conv, text)
-            return
-
-    # Check if user is showing scheduling intent
-    wants_to_schedule = any(t in user_lower for t in _USER_SCHEDULE_TRIGGERS)
-
-    # Also detect: if the bot just asked about scheduling and user says yes/dale/si/ok
-    if not wants_to_schedule:
-        last_bot_msg = ""
-        for msg in reversed(conv.messages):
-            if msg.get("role") == "assistant":
-                last_bot_msg = msg["content"].lower()
-                break
-        scheduling_question = any(w in last_bot_msg for w in (
-            "busque un horario", "buscar horario", "agendar", "agendamos",
-            "te agendo", "quieres que te busque",
-        ))
-        if scheduling_question:
-            affirmative = any(w in user_lower for w in (
-                "si", "sí", "dale", "ok", "listo", "claro", "bueno",
-                "perfecto", "va", "de una", "con toda", "porfa",
-            ))
-            if affirmative:
-                wants_to_schedule = True
-
-    if wants_to_schedule:
-        if conv.phase not in (
-            "awaiting_slot_selection", "collecting_data",
-            "appointment_confirmed", "escalated_to_yesica",
-        ):
-            logger.info(f"User scheduling intent detected for {conv.phone}")
-            await _fetch_and_inject_slots(conv)
-            reply = await _generate_reply(conv)
-            await _send_and_record(conv, reply)
-            return
-
-    # Default: generate reply
+    # Let GPT generate its reply — it decides what to do via tags
     reply = await _generate_reply(conv)
 
-    # SAFETY: If bot invented a specific time without calendar data, intercept and force calendar check
-    if conv.phase not in ("awaiting_slot_selection", "collecting_data", "appointment_confirmed", "escalated_to_yesica"):
+    # Strip tags from the reply and detect actions
+    has_calendar_tag = _TAG_CHECK_CALENDAR in reply
+    has_evening_tag = _TAG_EVENING in reply
+    reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").strip()
+
+    # Safety: also detect invented times even without tags
+    if not has_calendar_tag and conv.phase not in (
+        "awaiting_slot_selection", "collecting_data",
+        "appointment_confirmed", "escalated_to_yesica",
+    ):
         if _contains_invented_time(reply) and not conv.calendar_slots_json:
-            logger.warning(f"[{conv.phone}] Bot invented a time without calendar data — forcing calendar check")
-            await _fetch_and_inject_slots(conv)
-            reply = await _generate_reply(conv)
+            logger.warning(f"[{conv.phone}] Bot invented a time — forcing calendar check")
+            has_calendar_tag = True
 
-    await _send_and_record(conv, reply)
-
-    # Detect trigger phrase from bot reply → fetch slots
-    reply_lower = reply.lower()
-    if any(t in reply_lower for t in _BOT_SLOT_TRIGGERS):
-        if conv.phase not in (
-            "awaiting_slot_selection", "collecting_data",
-            "appointment_confirmed", "escalated_to_yesica",
-        ):
-            logger.info(f"Bot slot trigger detected for {conv.phone}")
-            await _fetch_and_inject_slots(conv)
-            slot_reply = await _generate_reply(conv)
-            await _send_and_record(conv, slot_reply)
+    # ACTION: Evening/weekend escalation
+    if has_evening_tag and conv.phase not in ("appointment_confirmed", "escalated_to_yesica"):
+        await _send_and_record(conv, reply)
+        await _escalate_to_yesica_evening(conv, text)
         return
+
+    # ACTION: Check calendar and offer real slots
+    if has_calendar_tag and conv.phase not in (
+        "awaiting_slot_selection", "collecting_data",
+        "appointment_confirmed", "escalated_to_yesica",
+    ):
+        logger.info(f"[{conv.phone}] Calendar check triggered by GPT")
+        # Send the "déjame revisar" message first
+        if reply:
+            await _send_and_record(conv, reply)
+        # Fetch real slots and generate follow-up
+        await _fetch_and_inject_slots(conv)
+        slot_reply = await _generate_reply(conv)
+        await _send_and_record(conv, slot_reply)
+        return
+
+    # Normal reply
+    await _send_and_record(conv, reply)
 
 
 # ---------------------------------------------------------------------------
