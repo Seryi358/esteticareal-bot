@@ -24,7 +24,7 @@ async def chat(messages: list[dict]) -> str:
         response = await get_client().chat.completions.create(
             model="gpt-4o",
             messages=messages,
-            temperature=0.1,
+            temperature=0.4,
             max_tokens=250,
             presence_penalty=0.3,
             frequency_penalty=0.3,
