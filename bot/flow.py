@@ -582,9 +582,13 @@ def _ensure_conversation_alive(reply: str, phase: str) -> str:
     if phase in ("appointment_confirmed", "escalated_to_yesica"):
         return reply
 
+    # If reply contains instagram link, it's an out-of-zone goodbye — don't add question
+    if "instagram.com" in reply.lower():
+        return reply
+
     # Before appointment: if no question mark, GPT forgot — add one
     if "?" not in reply:
-        return reply + " ¿Qué te parece?"
+        return reply + " ¿Te interesa?"
 
     return reply
 
