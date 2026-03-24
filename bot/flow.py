@@ -146,8 +146,14 @@ def _clean_push_name(raw: str | None) -> str | None:
     if extracted:
         return extracted
 
-    # Short single word that looks reasonable
+    # Short single word — only use if it looks like a real name (no weird patterns)
     if len(no_numbers) <= 10 and no_numbers.isalpha():
+        # Reject patterns like "xxxdarkxxx", repeated chars, or gamer tags
+        lower = no_numbers.lower()
+        if lower != lower.replace("x", "", 2) and lower.count("x") >= 3:
+            return None
+        if any(c * 3 in lower for c in "abcdefghijklmnopqrstuvwxyz"):
+            return None
         return no_numbers.capitalize()
 
     return None
@@ -723,6 +729,9 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
 
 async def _send_and_record(conv: ConversationState, reply: str) -> None:
     """Split reply by [MSG], send each part as a separate WhatsApp message."""
+    # Safety net: ensure response never dies without a question/continuation
+    reply = _ensure_conversation_alive(reply)
+
     parts = [p.strip() for p in reply.split("[MSG]") if p.strip()]
     if not parts:
         return
@@ -735,6 +744,36 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
         delay = min(1.0 + len(part) * 0.015, 3.5)
         await asyncio.sleep(delay)
         await evolution.send_text_message(conv.phone, part)
+
+
+def _ensure_conversation_alive(reply: str) -> str:
+    """Guarantee every response has a question or continuation. Never let conversation die."""
+    if not reply or not reply.strip():
+        return "¿En qué te puedo ayudar?"
+
+    # Check if reply already has a question mark
+    if "?" in reply:
+        return reply
+
+    # Check if reply has a continuation phrase
+    continuation_phrases = (
+        "cuéntame", "cuentame", "dime", "escríbeme", "escribeme",
+        "avísame", "avisame", "me cuentas",
+    )
+    reply_lower = reply.lower()
+    if any(p in reply_lower for p in continuation_phrases):
+        return reply
+
+    # No question and no continuation — add a natural follow-up
+    # Pick based on conversation context
+    if any(w in reply_lower for w in ("valoración", "valoracion", "cita", "agendar")):
+        return reply + " ¿Te gustaría agendar?"
+    elif any(w in reply_lower for w in ("tratamiento", "glúteos", "gluteos", "resultado")):
+        return reply + " ¿Quieres saber más?"
+    elif any(w in reply_lower for w in ("instagram", "instagram.com")):
+        return reply  # Instagram links are ok without question (user is out of zone)
+    else:
+        return reply + " ¿Qué te gustaría saber?"
 
 
 # ---------------------------------------------------------------------------
