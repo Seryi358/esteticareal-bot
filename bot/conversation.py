@@ -100,8 +100,23 @@ def save_conversation(conv: ConversationState) -> None:
         from services.sheets import sync_conversation
         nombre = conv.collected_name or conv.user_display_name
         is_booked = conv.phase == "appointment_confirmed"
+        appointment_dt = ""
+        if conv.appointment_datetime:
+            try:
+                from datetime import datetime as _dt
+                apt = _dt.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+                appointment_dt = apt.strftime("%Y-%m-%d %I:%M %p")
+            except Exception:
+                pass
         asyncio.ensure_future(
-            sync_conversation(conv.phone, nombre, is_booked, False)
+            sync_conversation(
+                conv.phone,
+                nombre=nombre,
+                ciudad=conv.city,
+                servicio=conv.service_interest,
+                is_booked=is_booked,
+                appointment_dt=appointment_dt,
+            )
         )
     except Exception:
         pass  # Don't let sheets sync failure break conversation saves
