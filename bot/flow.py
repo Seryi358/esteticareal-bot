@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -14,149 +13,8 @@ from services import ai, calendar, evolution
 logger = logging.getLogger(__name__)
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
-# Regex to strip emojis and special unicode symbols
-_EMOJI_RE = re.compile(
-    r"[\U0001F600-\U0001F64F\U0001F300-\U0001F5FF\U0001F680-\U0001F6FF"
-    r"\U0001F1E0-\U0001F1FF\U0001FA00-\U0001FAFF\U0001F900-\U0001F9FF"
-    r"\U00002702-\U000027B0\U0000FE00-\U0000FE0F\U0000200D\U00002600-\U000026FF"
-    r"\U00002700-\U000027BF\U0000231A-\U0000231B\U00002934-\U00002935"
-    r"\U000025AA-\U000025FE\U00002B05-\U00002B55\U00003030\U0000303D"
-    r"\U00003297\U00003299\U0000200B-\U0000200F\u2728\u2764\u2665\u2763"
-    r"\u270A-\u270D\u2744\u274C\u274E\u2753-\u2755\u2757\u2795-\u2797"
-    r"\u27A1\u27B0\u27BF✨]+",
-    re.UNICODE,
-)
-
-# ---------------------------------------------------------------------------
-# Common Spanish names — used to extract names from usernames
-# ---------------------------------------------------------------------------
-_COMMON_NAMES = {
-    # Female
-    "maria", "ana", "laura", "andrea", "diana", "paula", "sara", "luz",
-    "angela", "angelica", "sandra", "carolina", "paola", "valentina",
-    "juliana", "natalia", "monica", "camila", "daniela", "alejandra",
-    "catalina", "isabella", "sofia", "gabriela", "fernanda", "luisa",
-    "marcela", "patricia", "claudia", "liliana", "adriana", "carmen",
-    "rosa", "elena", "lucia", "marta", "pilar", "gloria", "teresa",
-    "beatriz", "silvia", "yesica", "jessica", "jennifer", "katherine",
-    "karen", "vanessa", "wendy", "tatiana", "milena", "johana",
-    "lorena", "viviana", "lina", "mayra", "marisol", "rocio",
-    "xiomara", "yolanda", "olga", "martha", "nelly", "constanza",
-    "manuela", "mariana", "isabel", "veronica", "estefania",
-    "stephanie", "kelly", "leidy", "dayana", "yuliana", "lizeth",
-    "ingrid", "melissa", "erika", "karina", "marina", "susana",
-    "elizabeth", "cristina", "alicia", "norma", "blanca", "dora",
-    "cecilia", "amparo", "bibiana", "nancy", "flor", "stella",
-    "johanna", "vivian", "margaret", "irene", "esperanza",
-    "ximena", "cindy", "wendy", "nathalia", "yurani", "yeimi",
-    "lady", "yenny", "jenny", "milady", "derly", "angie",
-    # Male
-    "juan", "carlos", "pedro", "jose", "luis", "diego", "andres",
-    "david", "santiago", "sebastian", "nicolas", "daniel", "alejandro",
-    "felipe", "miguel", "fernando", "ricardo", "jorge", "oscar",
-    "ivan", "sergio", "pablo", "mario", "roberto", "alberto",
-    "cristian", "william", "edison", "edwin", "jhon", "john",
-    "jaime", "rafael", "guillermo", "raul", "hector", "hugo",
-    "francisco", "manuel", "antonio", "gabriel", "martin", "cesar",
-    "camilo", "fabian", "german", "gustavo", "hernan", "nelson",
-    "omar", "victor", "julian", "mateo", "samuel", "brayan",
-    "kevin", "stiven", "yeison", "duvan", "steven", "alex",
-    "alexander", "freddy", "frank", "henry", "harold", "leonel",
-}
-
-
-def _extract_name_from_username(text: str) -> str | None:
-    """Try to extract a real name from a concatenated username.
-    e.g., 'angelicadiaz0212' → 'Angelica', 'juanpedro123' → 'Juan'
-    """
-    text_lower = text.lower().strip()
-    # Try each name prefix — longest match wins
-    matches = [n for n in _COMMON_NAMES if text_lower.startswith(n)]
-    if matches:
-        best = max(matches, key=len)
-        return best.capitalize()
-    return None
-
-
-def _is_likely_person_name(text: str) -> bool:
-    """Check if text looks like a person's name vs an organization/random text."""
-    words = text.split()
-    # All uppercase multi-word → likely organization ("LEONES TIGRES FC")
-    if len(words) >= 2 and all(w.isupper() and len(w) > 1 for w in words):
-        return False
-    # Contains obvious non-name words
-    non_name_indicators = (
-        "fc", "club", "team", "store", "shop", "tienda", "empresa",
-        "corp", "inc", "llc", "sas", "sa", "oficial", "official",
-        "real", "group", "grupo", "fundacion", "asociacion",
-    )
-    text_lower = text.lower()
-    if any(w in text_lower.split() for w in non_name_indicators):
-        return False
-    # Check if any word matches a known name
-    for word in words:
-        if word.lower() in _COMMON_NAMES:
-            return True
-    # Single reasonable word
-    if len(words) == 1 and 2 <= len(text) <= 12:
-        return True
-    return len(words) <= 3
-
-
-def _clean_push_name(raw: str | None) -> str | None:
-    """
-    Extract a usable first name from a WhatsApp push name.
-    Handles: normal names, concatenated usernames, and detects non-names.
-    """
-    if not raw:
-        return None
-
-    # Strip emojis
-    cleaned = _EMOJI_RE.sub("", raw).strip()
-    if not cleaned or len(cleaned) < 2:
-        return None
-
-    # First check: if it looks like an organization/non-person → None
-    if not _is_likely_person_name(cleaned):
-        return None
-
-    # Remove numbers
-    no_numbers = re.sub(r"\d+", "", cleaned).strip()
-    # Remove stray special characters but keep letters, spaces, accents
-    no_numbers = re.sub(r"[^a-záéíóúñüA-ZÁÉÍÓÚÑÜ\s]", "", no_numbers).strip()
-
-    if not no_numbers or len(no_numbers) < 2:
-        return None
-
-    # If it has spaces, take the first word
-    if " " in no_numbers:
-        parts = [p for p in no_numbers.split() if len(p) >= 2]
-        if parts:
-            first = parts[0]
-            if first.lower() in _COMMON_NAMES or len(first) <= 12:
-                return first.capitalize()
-        return None
-
-    # Single word — check if it's a known name
-    if no_numbers.lower() in _COMMON_NAMES:
-        return no_numbers.capitalize()
-
-    # Try to extract a name from a concatenated username (e.g., "angelicadiaz")
-    extracted = _extract_name_from_username(no_numbers)
-    if extracted:
-        return extracted
-
-    # Short single word — only use if it looks like a real name (no weird patterns)
-    if len(no_numbers) <= 10 and no_numbers.isalpha():
-        # Reject patterns like "xxxdarkxxx", repeated chars, or gamer tags
-        lower = no_numbers.lower()
-        if lower != lower.replace("x", "", 2) and lower.count("x") >= 3:
-            return None
-        if any(c * 3 in lower for c in "abcdefghijklmnopqrstuvwxyz"):
-            return None
-        return no_numbers.capitalize()
-
-    return None
+# Cache for push name results to avoid repeated GPT calls for the same name
+_push_name_cache: dict[str, str | None] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -182,10 +40,14 @@ async def process_message(
     media_base64_inline: str | None,
 ) -> None:
     """Main handler called from the webhook endpoint."""
-    # Clean the push name
-    push_name = _clean_push_name(push_name)
-    if push_name:
-        _pending_names[phone] = push_name
+    # Extract name from push name using GPT (with cache)
+    if push_name and push_name not in _push_name_cache:
+        extracted = await ai.extract_name_from_pushname(push_name)
+        _push_name_cache[push_name] = extracted
+        logger.info(f"[{phone}] Push name '{push_name}' → '{extracted}'")
+    resolved_name = _push_name_cache.get(push_name) if push_name else None
+    if resolved_name:
+        _pending_names[phone] = resolved_name
 
     # Check human takeover — if Yesica's window is active, bot stays silent
     conv = load_conversation(phone)
@@ -206,8 +68,8 @@ async def process_message(
     # Audio — transcribe first, then treat as text
     if message_type == "audioMessage":
         conv = load_conversation(phone)
-        if push_name and not conv.user_display_name:
-            conv.user_display_name = push_name
+        if resolved_name and not conv.user_display_name:
+            conv.user_display_name = resolved_name
         try:
             await _handle_audio(conv, media_key_id, media_base64_inline)
         except Exception as e:
@@ -223,8 +85,8 @@ async def process_message(
     # Images
     if message_type == "imageMessage":
         conv = load_conversation(phone)
-        if push_name and not conv.user_display_name:
-            conv.user_display_name = push_name
+        if resolved_name and not conv.user_display_name:
+            conv.user_display_name = resolved_name
         try:
             await _handle_image(conv, media_key_id, media_base64_inline)
         except Exception as e:
@@ -429,15 +291,6 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     has_calendar_tag = _TAG_CHECK_CALENDAR in reply
     has_evening_tag = _TAG_EVENING in reply
     reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").strip()
-
-    # Safety: also detect invented times even without tags
-    if not has_calendar_tag and conv.phase not in (
-        "awaiting_slot_selection", "collecting_data",
-        "appointment_confirmed", "escalated_to_yesica",
-    ):
-        if _contains_invented_time(reply) and not conv.calendar_slots_json:
-            logger.warning(f"[{conv.phone}] Bot invented a time — forcing calendar check")
-            has_calendar_tag = True
 
     # ACTION: Evening/weekend escalation
     if has_evening_tag and conv.phase not in ("appointment_confirmed", "escalated_to_yesica"):
@@ -868,26 +721,6 @@ async def _notify_yesica_appointment(
 
     # _extract_slot_from_text removed — GPT handles slot parsing via ai.parse_slot_selection
 
-
-def _contains_invented_time(reply: str) -> bool:
-    """Detect if the bot's reply contains specific times/days that look like invented scheduling.
-    Returns True if the reply mentions specific appointment times without calendar data."""
-    reply_lower = reply.lower()
-
-    # Patterns that indicate the bot is offering a specific time
-    time_patterns = [
-        r'\d{1,2}\s*(am|pm|a\.m|p\.m)',           # "3pm", "10 am"
-        r'a las \d{1,2}',                          # "a las 3"
-        r'mañana (a las|en la|por la)',            # "mañana a las 10"
-        r'(lunes|martes|miércoles|miercoles|jueves|viernes).*(a las|en la|por la)',  # "jueves a las 2"
-        r'tiene (disponible|libre|espacio).*(mañana|lunes|martes|miércoles|miercoles|jueves|viernes)',
-        r'te (agendo|separo|reservo) para',        # "te agendo para mañana"
-    ]
-
-    for pattern in time_patterns:
-        if re.search(pattern, reply_lower):
-            return True
-    return False
 
 
 def _format_appointment_datetime(dt: datetime) -> str:

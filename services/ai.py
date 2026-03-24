@@ -105,6 +105,39 @@ async def transcribe_audio(base64_audio: str) -> str | None:
         return None
 
 
+async def extract_name_from_pushname(push_name: str) -> str | None:
+    """Use GPT to extract a real first name from a WhatsApp push name.
+    Returns the name capitalized, or None if it's not a person's name."""
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": (
+                f"Analiza este nombre de perfil de WhatsApp: \"{push_name}\"\n\n"
+                "Determina si contiene un nombre real de persona. Ejemplos:\n"
+                "- 'angelicadiaz0212' → 'Angelica'\n"
+                "- 'Maria Jose Lopez' → 'Maria'\n"
+                "- 'LEONES TIGRES FC' → null (no es persona)\n"
+                "- 'juanpedro123' → 'Juan'\n"
+                "- 'tienda_online' → null (no es persona)\n"
+                "- 'laura 💕✨' → 'Laura'\n"
+                "- 'solo llamadas de emergenc' → null (no es nombre)\n"
+                "- '.' → null\n"
+                "- 'Dr. Martinez' → 'Martinez'\n\n"
+                "Responde SOLO con JSON: {\"name\": \"Nombre\" } o {\"name\": null}"
+            )}],
+            temperature=0.0,
+            max_tokens=50,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content.strip()
+        result = json.loads(raw)
+        name = result.get("name")
+        return name if name else None
+    except Exception as e:
+        logger.error(f"Push name extraction error: {e}")
+        return None
+
+
 async def parse_slot_selection(user_message: str, available_slots: list[str], current_datetime: str) -> str | None:
     """Use GPT to understand which slot the user wants from their natural language.
     Returns the ISO datetime string of the selected slot, or None."""
