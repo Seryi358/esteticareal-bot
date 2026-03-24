@@ -584,13 +584,7 @@ def _ensure_conversation_alive(reply: str, phase: str) -> str:
     if "instagram.com" in reply.lower():
         return reply
 
-    # If GPT forgot a question before booking, add a natural one
-    if "?" not in reply:
-        reply_lower = reply.lower()
-        if any(w in reply_lower for w in ("agendado", "confirmada", "cita", "registrada")):
-            return reply  # Confirmation messages don't need a question
-        return reply + " ¿Qué dices?"
-
+    # If GPT forgot a question, don't add genéricas — let GPT handle it
     return reply
 
 
