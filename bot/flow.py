@@ -451,11 +451,9 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         "appointment_confirmed", "escalated_to_yesica",
     ):
         logger.info(f"[{conv.phone}] Calendar check triggered by GPT")
-        # Send the "déjame revisar" message first
-        if reply:
-            await _send_and_record(conv, reply)
-        # Fetch real slots and generate follow-up
+        # Fetch real slots FIRST
         await _fetch_and_inject_slots(conv)
+        # Generate ONE reply that includes the slots (or error message)
         slot_reply = await _generate_reply(conv)
         await _send_and_record(conv, slot_reply)
         return
