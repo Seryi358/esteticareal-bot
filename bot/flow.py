@@ -708,9 +708,11 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
         formatted = calendar.format_slots_for_whatsapp(slots)
         conv.inject_system_event(
             f"CALENDAR_SLOTS: Yesica tiene disponible {formatted}. "
-            f"INSTRUCCION: Presenta esto de forma CONVERSACIONAL, por ejemplo: "
-            f"'Yesica tiene disponible {formatted}, te sirve o preferis otro horario?' "
-            f"NO hagas lista, NO uses bullet points. Maximo 2 burbujas."
+            f"INSTRUCCION: Ofrece PRIMERO solo UN horario (el mas proximo, ej: 'mañana en la mañana'). "
+            f"Si el usuario dice que no puede, ofrece la otra franja del MISMO dia (ej: la tarde). "
+            f"Solo si no puede en ninguna franja de ese dia, ofrece otro dia. "
+            f"Se proactivo: 'Mañana tiene disponible en la mañana, te sirve o prefieres en la tarde?' "
+            f"NO hagas lista. Conversacional."
         )
         logger.info(f"Calendar slots fetched for {conv.phone}: {len(slots)} slots")
     else:

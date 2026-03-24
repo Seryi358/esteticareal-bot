@@ -196,7 +196,7 @@ def _format_hour(dt: datetime) -> str:
 
 
 def format_slots_for_whatsapp(slots: list[datetime]) -> str:
-    """Format available slots as a single natural sentence with max 2 time ranges."""
+    """Format available slots grouped by day, showing morning and afternoon separately."""
     ranges = group_slots_into_ranges(slots)
     if not ranges:
         return "No hay horarios disponibles en este momento."
@@ -206,15 +206,11 @@ def format_slots_for_whatsapp(slots: list[datetime]) -> str:
         4: "viernes", 5: "sabado", 6: "domingo",
     }
 
-    # Limit to 2 ranges max — keep it ultra simple
-    ranges = ranges[:2]
-
     now = datetime.now(COLOMBIA_TZ)
-    parts = []
-    for start, end in ranges:
-        start_str = _format_hour(start)
-        end_str = _format_hour(end)
 
+    # Group ranges by day, keep up to 3 days max
+    day_ranges: dict[str, list[str]] = {}
+    for start, end in ranges:
         if start.date() == now.date():
             label = "hoy"
         elif start.date() == (now + timedelta(days=1)).date():
@@ -222,11 +218,26 @@ def format_slots_for_whatsapp(slots: list[datetime]) -> str:
         else:
             label = f"el {days_es[start.weekday()]}"
 
-        parts.append(f"{label} de {start_str} a {end_str}")
+        time_range = f"de {_format_hour(start)} a {_format_hour(end)}"
+        if label not in day_ranges:
+            day_ranges[label] = []
+        day_ranges[label].append(time_range)
 
-    if len(parts) == 1:
-        return parts[0]
-    return f"{parts[0]} y {parts[1]}"
+        if len(day_ranges) >= 3:
+            break
+
+    # Format: "mañana de 9am a 12pm y de 2pm a 5pm" or "mañana de 9am a 12pm, y el jueves de 9am a 5pm"
+    day_parts = []
+    for label, time_ranges in day_ranges.items():
+        if len(time_ranges) == 1:
+            day_parts.append(f"{label} {time_ranges[0]}")
+        else:
+            joined = " y ".join(time_ranges)
+            day_parts.append(f"{label} {joined}")
+
+    if len(day_parts) == 1:
+        return day_parts[0]
+    return ", ".join(day_parts[:-1]) + " y " + day_parts[-1]
 
 
 async def create_appointment(
