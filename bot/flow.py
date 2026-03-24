@@ -480,6 +480,14 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
 
     # Default: generate reply
     reply = await _generate_reply(conv)
+
+    # SAFETY: If bot invented a specific time without calendar data, intercept and force calendar check
+    if conv.phase not in ("awaiting_slot_selection", "collecting_data", "appointment_confirmed", "escalated_to_yesica"):
+        if _contains_invented_time(reply) and not conv.calendar_slots_json:
+            logger.warning(f"[{conv.phone}] Bot invented a time without calendar data — forcing calendar check")
+            await _fetch_and_inject_slots(conv)
+            reply = await _generate_reply(conv)
+
     await _send_and_record(conv, reply)
 
     # Detect trigger phrase from bot reply → fetch slots
@@ -876,7 +884,7 @@ async def _generate_reply(conv: ConversationState) -> str:
     elif user_word_count <= 15:
         mirror_instruction = (
             f"EFECTO ESPEJO: El usuario escribió {user_word_count} palabras. "
-            f"Respondé con longitud similar: máximo 2-3 líneas. UN solo mensaje."
+            f"Responde con longitud similar: máximo 2-3 líneas. UN solo mensaje."
         )
     elif user_word_count <= 30:
         mirror_instruction = (
@@ -1020,6 +1028,27 @@ def _extract_slot_from_text(text: str, slots: list[datetime]) -> datetime | None
             return candidates[0]
 
     return None
+
+
+def _contains_invented_time(reply: str) -> bool:
+    """Detect if the bot's reply contains specific times/days that look like invented scheduling.
+    Returns True if the reply mentions specific appointment times without calendar data."""
+    reply_lower = reply.lower()
+
+    # Patterns that indicate the bot is offering a specific time
+    time_patterns = [
+        r'\d{1,2}\s*(am|pm|a\.m|p\.m)',           # "3pm", "10 am"
+        r'a las \d{1,2}',                          # "a las 3"
+        r'mañana (a las|en la|por la)',            # "mañana a las 10"
+        r'(lunes|martes|miércoles|miercoles|jueves|viernes).*(a las|en la|por la)',  # "jueves a las 2"
+        r'tiene (disponible|libre|espacio).*(mañana|lunes|martes|miércoles|miercoles|jueves|viernes)',
+        r'te (agendo|separo|reservo) para',        # "te agendo para mañana"
+    ]
+
+    for pattern in time_patterns:
+        if re.search(pattern, reply_lower):
+            return True
+    return False
 
 
 def _format_appointment_datetime(dt: datetime) -> str:
