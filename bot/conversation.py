@@ -32,6 +32,7 @@ class ConversationState:
     last_user_message_at: Optional[str] = None  # ISO timestamp — for 24h follow-up
     follow_up_sent: bool = False  # True after automatic 24h follow-up sent
     reminder_sent: bool = False  # True after appointment reminder sent (2h before)
+    reminder_day_before_sent: bool = False  # True after day-before reminder sent (24h before)
     messages: list = field(default_factory=list)
 
     def to_dict(self) -> dict:

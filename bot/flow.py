@@ -637,13 +637,13 @@ async def send_followup_if_needed(phone: str) -> bool:
 # ---------------------------------------------------------------------------
 
 async def send_reminder_if_needed(phone: str) -> bool:
-    """Check if this conversation has an upcoming appointment and send a reminder.
-    Sends reminder 2 hours before the appointment. Returns True if sent."""
+    """Check if this conversation has an upcoming appointment and send reminders.
+    - Day-before reminder: sent between 20h and 26h before the appointment.
+    - Same-day reminder: sent between 1.5h and 2.5h before the appointment.
+    Returns True if any reminder was sent."""
     conv = load_conversation(phone)
 
     if conv.phase != "appointment_confirmed":
-        return False
-    if conv.reminder_sent:
         return False
     if not conv.appointment_datetime:
         return False
@@ -655,40 +655,70 @@ async def send_reminder_if_needed(phone: str) -> bool:
 
     now = datetime.now(COLOMBIA_TZ)
     time_until = (appointment - now).total_seconds()
-
-    # Send reminder between 1.5h and 2.5h before the appointment
-    if time_until < 5400 or time_until > 9000:  # 1.5h = 5400s, 2.5h = 9000s
-        return False
+    sent_any = False
 
     name = conv.user_display_name or conv.collected_name or ""
     greeting = f"Hola {name}" if name else "Hola"
     formatted_dt = _format_appointment_datetime(appointment)
-
-    # Send reminder to user
-    reminder_msg = (
-        f"{greeting}, te recuerdo que hoy tienes tu valoración con Yésica "
-        f"a las {appointment.strftime('%I:%M %p').lstrip('0')}. "
-        f"Te esperamos en la Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
-        f"(cerca de la Estación Madera del Metro). Llega unos minutos antes 😊"
-    )
-    await evolution.send_text_message(phone, reminder_msg)
-    conv.add_message("assistant", reminder_msg)
-
-    # Notify Yésica too
     settings = get_settings()
-    yesica_msg = (
-        f"⏰ *Recordatorio de cita*\n\n"
-        f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
-        f"*WhatsApp:* +{phone}\n"
-        f"*Hora:* {appointment.strftime('%I:%M %p').lstrip('0')}\n"
-        f"*Servicio:* {conv.service_interest or 'Levantamiento de glúteos'}"
-    )
-    await evolution.send_text_message(settings.yesica_phone, yesica_msg)
 
-    conv.reminder_sent = True
-    save_conversation(conv)
-    logger.info(f"[{phone}] Sent appointment reminder (appointment at {formatted_dt})")
-    return True
+    # ---- Day-before reminder (20h to 26h before) ----
+    if not conv.reminder_day_before_sent and 72000 <= time_until <= 93600:
+        day_before_msg = (
+            f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
+            f"para confirmar tu asistencia de mañana {appointment.strftime('%d de')} "
+            f"{_month_name(appointment.month)} a las {appointment.strftime('%I:%M %p').lstrip('0')}.\n\n"
+            f"Por favor confírmanos tu asistencia 🙏\n\n"
+            f"Recuerda que estamos ubicados en la Cra 49b #26b-50, Unidad Ciudad Central, "
+            f"Apto 1618, Torre 2, Bello (cerca de la Estación Madera del Metro). "
+            f"Cualquier duda o inquietud con la dirección nos haces saber para orientarte mejor 😊"
+        )
+        await evolution.send_text_message(phone, day_before_msg)
+        conv.add_message("assistant", day_before_msg)
+
+        # Notify Yésica
+        yesica_day_msg = (
+            f"📋 *Recordatorio cita mañana*\n\n"
+            f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
+            f"*WhatsApp:* +{phone}\n"
+            f"*Servicio:* {conv.service_interest or 'Valoración'}\n"
+            f"*Fecha:* {formatted_dt}"
+        )
+        await evolution.send_text_message(settings.yesica_phone, yesica_day_msg)
+
+        conv.reminder_day_before_sent = True
+        sent_any = True
+        logger.info(f"[{phone}] Sent day-before reminder (appointment at {formatted_dt})")
+
+    # ---- Same-day reminder (1.5h to 2.5h before) ----
+    if not conv.reminder_sent and 5400 <= time_until <= 9000:
+        reminder_msg = (
+            f"{greeting}, te recuerdo que hoy tienes tu valoración con Yésica "
+            f"a las {appointment.strftime('%I:%M %p').lstrip('0')}. "
+            f"Te esperamos en la Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
+            f"(cerca de la Estación Madera del Metro). Llega unos minutos antes 😊"
+        )
+        await evolution.send_text_message(phone, reminder_msg)
+        conv.add_message("assistant", reminder_msg)
+
+        # Notify Yésica too
+        yesica_msg = (
+            f"⏰ *Recordatorio de cita*\n\n"
+            f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
+            f"*WhatsApp:* +{phone}\n"
+            f"*Hora:* {appointment.strftime('%I:%M %p').lstrip('0')}\n"
+            f"*Servicio:* {conv.service_interest or 'Valoración'}"
+        )
+        await evolution.send_text_message(settings.yesica_phone, yesica_msg)
+
+        conv.reminder_sent = True
+        sent_any = True
+        logger.info(f"[{phone}] Sent same-day reminder (appointment at {formatted_dt})")
+
+    if sent_any:
+        save_conversation(conv)
+
+    return sent_any
 
 
 # ---------------------------------------------------------------------------
@@ -802,6 +832,14 @@ async def _notify_yesica_appointment(
 
     # _extract_slot_from_text removed — GPT handles slot parsing via ai.parse_slot_selection
 
+
+
+def _month_name(month: int) -> str:
+    return {
+        1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
+        5: "mayo", 6: "junio", 7: "julio", 8: "agosto",
+        9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre",
+    }[month]
 
 
 def _format_appointment_datetime(dt: datetime) -> str:
