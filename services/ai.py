@@ -138,7 +138,7 @@ async def extract_name_from_pushname(push_name: str) -> str | None:
         return None
 
 
-async def parse_slot_selection(user_message: str, available_slots: list[str], current_datetime: str) -> str | None:
+async def parse_slot_selection(user_message: str, available_slots: list[str], current_datetime: str, conversation_context: str = "") -> str | None:
     """Use GPT to understand which slot the user wants from their natural language.
     Returns the ISO datetime string of the selected slot, or None."""
     from datetime import datetime
@@ -175,11 +175,18 @@ async def parse_slot_selection(user_message: str, available_slots: list[str], cu
         day_name = days_es[first_dt.weekday()]
         slot_lines.append(f"  ({day_name}: {len(day_slots)} slots de {first_dt.strftime('%I:%M %p').lstrip('0')} a {last_dt.strftime('%I:%M %p').lstrip('0')})")
 
+    context_block = ""
+    if conversation_context:
+        context_block = f"""
+Contexto de la conversación reciente (para entender restricciones del usuario):
+{conversation_context}
+
+"""
+
     prompt = f"""El usuario está eligiendo un horario para una cita. Analiza su mensaje y selecciona el horario más apropiado.
 
 Fecha y hora actual: {current_datetime}
-
-Horarios disponibles:
+{context_block}Horarios disponibles:
 {chr(10).join(slot_lines)}
 
 Mensaje del usuario: "{user_message}"
@@ -187,14 +194,16 @@ Mensaje del usuario: "{user_message}"
 Responde SOLO con JSON. El valor de "selected" debe ser el ISO EXACTO de la lista:
 {{"selected": "2026-03-25T09:00:00-05:00"}}
 
-Si el usuario no está eligiendo un horario, responde:
+Si el usuario no está eligiendo un horario o dice que NO puede en cierto horario, responde:
 {{"selected": null}}
 
 REGLAS:
 - Solo puedes elegir un ISO que esté EN LA LISTA
 - Si dice "en la mañana" elige el primer slot antes de 12pm de ese día
 - Si dice "en la tarde" elige el primer slot de 12pm en adelante
-- Si dice solo un día sin hora, elige el primer slot disponible de ese día"""
+- Si dice solo un día sin hora, elige el primer slot disponible de ese día
+- Si el usuario dice que NO puede en cierto horario/día, responde null — NO elijas ese horario
+- Presta atención al contexto: si el usuario previamente dijo que no puede a cierta hora, respétalo"""
 
     try:
         response = await get_client().chat.completions.create(

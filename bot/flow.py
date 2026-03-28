@@ -324,14 +324,6 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
     settings = get_settings()
 
     conv.phase = "escalated_to_yesica"
-    conv.inject_system_event(
-        "EVENING_ESCALATION: El usuario necesita un horario fuera del rango normal "
-        "(después de 5pm o fin de semana). Dile que lo conectás directamente con "
-        "Yésica para coordinar ese horario especial. Sé natural y positiva."
-    )
-
-    reply = await _generate_reply(conv)
-    await _send_and_record(conv, reply)
 
     # Notify Yésica with context
     name = conv.collected_name or conv.user_display_name or "Cliente"
@@ -358,6 +350,23 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     """User is picking a time slot. GPT parses the selection."""
+    # Check if user needs evening/weekend hours — escalate even during slot selection
+    evening_keywords = ["después de las 5", "despues de las 5", "en la noche", "por la noche",
+                        "a las 6", "a las 7", "a las 8", "fin de semana", "sábado", "sabado",
+                        "domingo", "después de las 4", "despues de las 4", "7pm", "8pm", "6pm",
+                        "solo puedo en la noche", "horario nocturno"]
+    text_lower = text.lower()
+    if any(kw in text_lower for kw in evening_keywords):
+        conv.inject_system_event(
+            "EVENING_ESCALATION: El usuario necesita un horario fuera del rango normal "
+            "(después de 5pm o fin de semana). Dile que lo conectas directamente con "
+            "Yésica para coordinar ese horario especial. Sé natural y positiva."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
+        await _escalate_to_yesica_evening(conv, text)
+        return
+
     if not conv.calendar_slots_json:
         await _fetch_and_inject_slots(conv)
         reply = await _generate_reply(conv)
@@ -367,8 +376,17 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     available_slots = json.loads(conv.calendar_slots_json)
     now_str = datetime.now(COLOMBIA_TZ).strftime("%A %d/%m/%Y %I:%M %p")
 
+    # Build recent conversation context so GPT knows what user rejected
+    recent_context = ""
+    recent_msgs = [m for m in conv.messages[-10:] if m.get("role") in ("user", "assistant")]
+    if recent_msgs:
+        recent_context = "\n".join(
+            f"{'Usuario' if m['role'] == 'user' else 'Asistente'}: {m['content']}"
+            for m in recent_msgs
+        )
+
     # Let GPT understand what slot the user wants
-    selected_iso = await ai.parse_slot_selection(text, available_slots, now_str)
+    selected_iso = await ai.parse_slot_selection(text, available_slots, now_str, recent_context)
 
     if selected_iso:
         selected_slot = datetime.fromisoformat(selected_iso).replace(tzinfo=COLOMBIA_TZ)
@@ -545,6 +563,9 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
     """Send reply as WhatsApp messages with human-like timing."""
     import random
 
+    # Strip action tags that should never reach the user
+    reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").strip()
+
     # Safety net: ensure response never dies before appointment is confirmed
     reply = _ensure_conversation_alive(reply, conv.phase)
 
@@ -620,7 +641,7 @@ async def send_followup_if_needed(phone: str) -> bool:
     greeting = f"Hola {name}" if name else "Hola"
     followup_msg = (
         f"{greeting}, te escribo porque a Yésica le quedan pocos espacios esta semana "
-        f"para valoraciones. Recordá que este mes la valoración no tiene costo. "
+        f"para valoraciones. Recuerda que este mes la valoración no tiene costo. "
         f"¿Qué día te queda más fácil?"
     )
 
@@ -706,7 +727,7 @@ async def send_reminder_if_needed(phone: str) -> bool:
             f"⏰ *Recordatorio de cita*\n\n"
             f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
             f"*WhatsApp:* +{phone}\n"
-            f"*Hora:* {appointment.strftime('%I:%M %p').lstrip('0')}\n"
+            f"*Fecha:* {formatted_dt}\n"
             f"*Servicio:* {conv.service_interest or 'Valoración'}"
         )
         await evolution.send_text_message(settings.yesica_phone, yesica_msg)
@@ -783,12 +804,12 @@ async def _generate_reply(conv: ConversationState) -> str:
     elif user_word_count <= 30:
         mirror_instruction = (
             f"EFECTO ESPEJO: El usuario escribió {user_word_count} palabras. "
-            f"Podés responder con un párrafo corto. UN solo mensaje."
+            f"Puedes responder con un párrafo corto. UN solo mensaje."
         )
     else:
         mirror_instruction = (
             f"El usuario escribió un mensaje largo ({user_word_count} palabras). "
-            f"Podés responder con un poco más de detalle pero no te excedas."
+            f"Puedes responder con un poco más de detalle pero no te excedas."
         )
 
     name = conv.user_display_name
