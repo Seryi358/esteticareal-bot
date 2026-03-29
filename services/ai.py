@@ -29,7 +29,10 @@ async def chat(messages: list[dict]) -> str:
             presence_penalty=0.3,
             frequency_penalty=0.3,
         )
-        return response.choices[0].message.content.strip()
+        content = response.choices[0].message.content
+        if not content:
+            return "Disculpa, tuve un problema tecnico. Un momento y te respondo!"
+        return content.strip()
     except Exception as e:
         logger.error(f"OpenAI chat error: {e}")
         return "Disculpa, tuve un problema tecnico. Un momento y te respondo!"
@@ -62,8 +65,10 @@ async def analyze_image(base64_image: str) -> dict:
             max_tokens=400,
             response_format={"type": "json_object"},
         )
-        raw = response.choices[0].message.content.strip()
-        return json.loads(raw)
+        raw = response.choices[0].message.content
+        if not raw:
+            raise ValueError("Empty content from OpenAI")
+        return json.loads(raw.strip())
     except json.JSONDecodeError:
         logger.error("Image analysis response was not valid JSON")
         return {
@@ -129,8 +134,10 @@ async def extract_name_from_pushname(push_name: str) -> str | None:
             max_tokens=50,
             response_format={"type": "json_object"},
         )
-        raw = response.choices[0].message.content.strip()
-        result = json.loads(raw)
+        raw = response.choices[0].message.content
+        if not raw:
+            return None
+        result = json.loads(raw.strip())
         name = result.get("name")
         return name if name else None
     except Exception as e:
@@ -224,8 +231,10 @@ REGLAS:
             max_tokens=100,
             response_format={"type": "json_object"},
         )
-        raw = response.choices[0].message.content.strip()
-        result = json.loads(raw)
+        raw = response.choices[0].message.content
+        if not raw:
+            return None
+        result = json.loads(raw.strip())
         selected = result.get("selected")
         if not selected:
             return None
@@ -278,8 +287,10 @@ async def extract_user_data(messages: list[dict]) -> dict:
             max_tokens=150,
             response_format={"type": "json_object"},
         )
-        raw = response.choices[0].message.content.strip()
-        return json.loads(raw)
+        raw = response.choices[0].message.content
+        if not raw:
+            return {"name": None, "phone": None, "email": None}
+        return json.loads(raw.strip())
     except Exception as e:
         logger.error(f"Data extraction error: {e}")
         return {"name": None, "phone": None, "email": None}

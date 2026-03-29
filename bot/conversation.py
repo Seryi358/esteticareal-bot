@@ -112,15 +112,19 @@ def save_conversation(conv: ConversationState) -> None:
                 appointment_dt = f"{apt.strftime('%Y-%m-%d')} {h12}:{apt.strftime('%M')} {period}"
             except Exception:
                 pass
-        asyncio.ensure_future(
-            sync_conversation(
-                conv.phone,
-                nombre=nombre,
-                ciudad=conv.city,
-                servicio=conv.service_interest,
-                is_booked=is_booked,
-                appointment_dt=appointment_dt,
+        try:
+            loop = asyncio.get_running_loop()
+            loop.create_task(
+                sync_conversation(
+                    conv.phone,
+                    nombre=nombre,
+                    ciudad=conv.city,
+                    servicio=conv.service_interest,
+                    is_booked=is_booked,
+                    appointment_dt=appointment_dt,
+                )
             )
-        )
+        except RuntimeError:
+            pass  # No running event loop — skip sheets sync
     except Exception:
         pass  # Don't let sheets sync failure break conversation saves

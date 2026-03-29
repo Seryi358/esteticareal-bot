@@ -118,6 +118,6 @@ async def sync_conversation(
     appointment_dt: str | None = None,
 ) -> None:
     """Async wrapper — runs the blocking Sheets API call in a thread."""
-    await asyncio.get_event_loop().run_in_executor(
+    await asyncio.get_running_loop().run_in_executor(
         None, partial(_sync, phone, nombre, ciudad, servicio, is_booked, appointment_dt)
     )

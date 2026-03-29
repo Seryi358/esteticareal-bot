@@ -81,7 +81,7 @@ async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
     # Fetch actual events from Google Calendar (more reliable than freebusy)
     try:
         cal_id = settings.google_calendar_id
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _fetch_events():
             events_result = service.events().list(
@@ -334,7 +334,7 @@ async def create_appointment(
     }
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         event = await asyncio.wait_for(
             loop.run_in_executor(
                 None,

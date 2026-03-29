@@ -1,14 +1,16 @@
 import httpx
 import logging
+from collections import deque
 from urllib.parse import quote
 from config import get_settings
 
 logger = logging.getLogger(__name__)
 
 # Track IDs of messages sent BY the bot so we can distinguish them
-# from messages Yesica types manually (both have fromMe=true)
-_bot_sent_ids: set[str] = set()
-_MAX_SENT_IDS = 5000  # prevent unbounded growth
+# from messages Yesica types manually (both have fromMe=true).
+# Using deque with maxlen to avoid clearing all IDs at once (which would
+# cause false Yesica-intervention detection and silence the bot for 5 min).
+_bot_sent_ids: deque[str] = deque(maxlen=5000)
 
 
 def _headers() -> dict:
@@ -43,9 +45,7 @@ async def send_text_message(phone: str, text: str) -> bool:
             # Store the message ID so we can identify bot-sent messages in webhooks
             msg_id = data.get("key", {}).get("id")
             if msg_id:
-                _bot_sent_ids.add(msg_id)
-                if len(_bot_sent_ids) > _MAX_SENT_IDS:
-                    _bot_sent_ids.clear()
+                _bot_sent_ids.append(msg_id)
             return True
     except Exception as e:
         logger.error(f"Error sending message to {phone}: {e}")
@@ -84,9 +84,7 @@ async def send_media_message(
             data = response.json()
             msg_id = data.get("key", {}).get("id")
             if msg_id:
-                _bot_sent_ids.add(msg_id)
-                if len(_bot_sent_ids) > _MAX_SENT_IDS:
-                    _bot_sent_ids.clear()
+                _bot_sent_ids.append(msg_id)
             return True
     except Exception as e:
         logger.error(f"Error sending media to {phone}: {e}")
