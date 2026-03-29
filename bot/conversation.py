@@ -106,7 +106,10 @@ def save_conversation(conv: ConversationState) -> None:
             try:
                 from datetime import datetime as _dt
                 apt = _dt.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
-                appointment_dt = apt.strftime("%Y-%m-%d %I:%M %p")
+                h = apt.hour
+                period = "a.m." if h < 12 else "p.m."
+                h12 = 12 if h == 0 else (h - 12 if h > 12 else h)
+                appointment_dt = f"{apt.strftime('%Y-%m-%d')} {h12}:{apt.strftime('%M')} {period}"
             except Exception:
                 pass
         asyncio.ensure_future(

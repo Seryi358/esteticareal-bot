@@ -145,6 +145,14 @@ async def parse_slot_selection(user_message: str, available_slots: list[str], cu
     from zoneinfo import ZoneInfo
     COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
+    def _fmt_time_es(dt: datetime) -> str:
+        """Format time in Spanish: '4:30 p.m.', '9:00 a.m.'"""
+        hour = dt.hour
+        period = "a.m." if hour < 12 else "p.m."
+        h = 12 if hour == 0 else (hour - 12 if hour > 12 else hour)
+        minute = dt.strftime("%M")
+        return f"{h}:{minute} {period}"
+
     days_es = {0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves", 4: "viernes", 5: "sabado", 6: "domingo"}
 
     # Build human-readable list — pick first 3 slots per day to keep it compact but cover all days
@@ -167,13 +175,13 @@ async def parse_slot_selection(user_message: str, available_slots: list[str], cu
             iso = day_slots[idx]
             dt = datetime.fromisoformat(iso).replace(tzinfo=COLOMBIA_TZ)
             day_name = days_es[dt.weekday()]
-            human = f"{day_name} {dt.day}/{dt.month} a las {dt.strftime('%I:%M %p').lstrip('0')}"
+            human = f"{day_name} {dt.day}/{dt.month} a las {_fmt_time_es(dt)}"
             slot_lines.append(f"- {human} → ISO: {iso}")
         # Also note total available
         first_dt = datetime.fromisoformat(day_slots[0]).replace(tzinfo=COLOMBIA_TZ)
         last_dt = datetime.fromisoformat(day_slots[-1]).replace(tzinfo=COLOMBIA_TZ)
         day_name = days_es[first_dt.weekday()]
-        slot_lines.append(f"  ({day_name}: {len(day_slots)} slots de {first_dt.strftime('%I:%M %p').lstrip('0')} a {last_dt.strftime('%I:%M %p').lstrip('0')})")
+        slot_lines.append(f"  ({day_name}: {len(day_slots)} slots de {_fmt_time_es(first_dt)} a {_fmt_time_es(last_dt)})")
 
     context_block = ""
     if conversation_context:
@@ -199,11 +207,14 @@ Si el usuario no está eligiendo un horario o dice que NO puede en cierto horari
 
 REGLAS:
 - Solo puedes elegir un ISO que esté EN LA LISTA
-- Si dice "en la mañana" elige el primer slot antes de 12pm de ese día
-- Si dice "en la tarde" elige el primer slot de 12pm en adelante
+- Si dice "en la mañana" elige el primer slot antes de 12 p.m. de ese día
+- Si dice "en la tarde" elige el primer slot de 12 p.m. en adelante
 - Si dice solo un día sin hora, elige el primer slot disponible de ese día
 - Si el usuario dice que NO puede en cierto horario/día, responde null — NO elijas ese horario
-- Presta atención al contexto: si el usuario previamente dijo que no puede a cierta hora, respétalo"""
+- Si el usuario dice que solo puede DESPUÉS de cierta hora (ej: "después de las 5", "puedo a partir de las 4"), y NO hay slots disponibles después de esa hora, responde null
+- Si el usuario pide un horario fuera de 9 a.m. a 5 p.m. lunes a viernes (ej: noches, fines de semana), responde null
+- Presta atención al contexto: si el usuario previamente dijo que no puede a cierta hora, respétalo
+- NUNCA elijas un horario que contradiga las restricciones del usuario. Es preferible responder null que elegir un horario incorrecto"""
 
     try:
         response = await get_client().chat.completions.create(

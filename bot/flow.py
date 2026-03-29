@@ -284,6 +284,12 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_collect_data_and_schedule(conv)
         return
 
+    # Detect rescheduling/cancellation intent when appointment is already confirmed
+    if conv.phase == "appointment_confirmed":
+        if _wants_to_reschedule(text):
+            await _handle_reschedule(conv, text)
+            return
+
     # Let GPT generate its reply — it decides what to do via tags
     reply = await _generate_reply(conv)
 
@@ -313,6 +319,83 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
 
     # Normal reply
     await _send_and_record(conv, reply)
+
+
+# ---------------------------------------------------------------------------
+# Rescheduling — user wants to change or cancel an existing appointment
+# ---------------------------------------------------------------------------
+
+_RESCHEDULE_KEYWORDS = [
+    "no puedo", "no me queda", "no me sirve", "cambiar la cita", "cambiar cita",
+    "cambiar el horario", "cambiar horario", "cancelar", "reagendar", "reprogramar",
+    "otro horario", "otra hora", "otro día", "otro dia", "no voy a poder",
+    "me queda difícil", "me queda dificil", "puedo después", "puedo despues",
+    "a esa hora no", "ese día no", "ese dia no", "no me funciona",
+    "mover la cita", "mover cita", "cambiarla", "posponerla", "aplazar",
+]
+
+
+def _wants_to_reschedule(text: str) -> bool:
+    """Detect if user wants to cancel or reschedule their confirmed appointment."""
+    text_lower = text.lower()
+    return any(kw in text_lower for kw in _RESCHEDULE_KEYWORDS)
+
+
+async def _handle_reschedule(conv: ConversationState, text: str) -> None:
+    """Handle rescheduling request — cancel existing appointment and offer new slots."""
+    logger.info(f"[{conv.phone}] Rescheduling requested: '{text[:100]}'")
+
+    # Check if user needs evening/weekend (outside business hours)
+    evening_keywords = [
+        "después de las 5", "despues de las 5", "en la noche", "por la noche",
+        "a las 6", "a las 7", "a las 8", "fin de semana", "sábado", "sabado",
+        "domingo", "7pm", "8pm", "6pm", "horario nocturno",
+    ]
+    text_lower = text.lower()
+    needs_evening = any(kw in text_lower for kw in evening_keywords)
+
+    # Reset appointment state
+    old_dt = conv.appointment_datetime
+    conv.appointment_datetime = None
+    conv.calendar_slots_json = None
+    conv.reminder_sent = False
+    conv.reminder_day_before_sent = False
+
+    if needs_evening:
+        conv.inject_system_event(
+            "RESCHEDULE_EVENING: El usuario quiere cambiar su cita y necesita un horario "
+            "fuera del rango normal (después de 5pm o fin de semana). "
+            "Dile que lo conectas con Yésica para coordinar ese horario especial. "
+            "Sé comprensiva y natural."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
+        await _escalate_to_yesica_evening(conv, text)
+    else:
+        # Offer new slots
+        conv.phase = "chatting"
+        conv.inject_system_event(
+            "RESCHEDULE: El usuario quiere cambiar su cita. "
+            "Responde con comprensión (ej: 'Claro, sin problema') y ofrece buscar "
+            "otro horario. Incluye [REVISAR_AGENDA] al final de tu mensaje."
+        )
+        reply = await _generate_reply(conv)
+
+        # Process tags from GPT reply
+        has_calendar_tag = _TAG_CHECK_CALENDAR in reply
+        reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").strip()
+
+        if has_calendar_tag:
+            await _send_and_record(conv, reply)
+            await _fetch_and_inject_slots(conv)
+            slot_reply = await _generate_reply(conv)
+            await _send_and_record(conv, slot_reply)
+        else:
+            # GPT didn't add the tag — fetch slots anyway
+            await _send_and_record(conv, reply)
+            await _fetch_and_inject_slots(conv)
+            slot_reply = await _generate_reply(conv)
+            await _send_and_record(conv, slot_reply)
 
 
 # ---------------------------------------------------------------------------
@@ -351,10 +434,20 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     """User is picking a time slot. GPT parses the selection."""
     # Check if user needs evening/weekend hours — escalate even during slot selection
-    evening_keywords = ["después de las 5", "despues de las 5", "en la noche", "por la noche",
-                        "a las 6", "a las 7", "a las 8", "fin de semana", "sábado", "sabado",
-                        "domingo", "después de las 4", "despues de las 4", "7pm", "8pm", "6pm",
-                        "solo puedo en la noche", "horario nocturno"]
+    evening_keywords = [
+        "después de las 5", "despues de las 5", "después de las 6", "despues de las 6",
+        "después de las 7", "despues de las 7", "después de las 4", "despues de las 4",
+        "en la noche", "por la noche", "de noche",
+        "a las 6", "a las 7", "a las 8", "a las 9",
+        "6pm", "7pm", "8pm", "9pm", "6 pm", "7 pm", "8 pm", "9 pm",
+        "6 p.m", "7 p.m", "8 p.m", "9 p.m",
+        "fin de semana", "sábado", "sabado", "domingo",
+        "solo puedo en la noche", "horario nocturno",
+        "puedo después de las 5", "puedo despues de las 5",
+        "solo después de las 5", "solo despues de las 5",
+        "solo en la noche", "a partir de las 5", "a partir de las 6",
+        "de 5 en adelante", "de 6 en adelante",
+    ]
     text_lower = text.lower()
     if any(kw in text_lower for kw in evening_keywords):
         conv.inject_system_event(
@@ -457,12 +550,25 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
                     )
                 except Exception:
                     pass
+            # Send hard-coded confirmation even on calendar API failure
+            uname = conv.user_display_name or conv.collected_name or ""
+            greet = f"{uname}, te" if uname else "Te"
+            fallback_msg = (
+                f"{greet} confirmo que tu cita quedó agendada para el "
+                f"{formatted_dt}.\n\n"
+                f"📍 Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
+                f"(cerca de la Estación Madera del Metro).\n\n"
+                f"Llega unos 5-10 minutos antes. Si necesitas cambiarla o cancelarla, "
+                f"puedes escribirme directamente por este WhatsApp."
+            )
+            await evolution.send_text_message(conv.phone, fallback_msg)
+            conv.add_message("assistant", fallback_msg)
             conv.inject_system_event(
                 f"APPOINTMENT_CONFIRMED: Cita registrada para {formatted_dt}. "
-                f"Da detalles: fecha/hora, direccion (Cra 49b #26b-50, Unidad Ciudad Central, "
-                f"Apto 1618, Torre 2, Bello), Estacion Madera del Metro, llegar antes, "
-                f"cancelar con 24h."
+                f"Ya le enviaste la confirmación. Si responde, sé natural."
             )
+        # Confirmation already sent hard-coded — no GPT reply needed
+        return
     elif conv.appointment_datetime and not has_name:
         conv.inject_system_event(
             "INSTRUCCION: Ya tienes el horario. Solo falta el nombre completo "
@@ -494,14 +600,25 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
     formatted_dt = _format_appointment_datetime(slot)
     conv.phase = "appointment_confirmed"
 
+    # Send hard-coded confirmation message — never let GPT generate date/time text
+    name = conv.user_display_name or conv.collected_name or ""
+    greeting = f"{name}, te" if name else "Te"
+    confirmation_msg = (
+        f"{greeting} confirmo que tu cita quedó agendada para el "
+        f"{formatted_dt}.\n\n"
+        f"📍 Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
+        f"(cerca de la Estación Madera del Metro).\n\n"
+        f"Llega unos 5-10 minutos antes. Si necesitas cambiarla o cancelarla, "
+        f"puedes escribirme directamente por este WhatsApp."
+    )
+    await evolution.send_text_message(conv.phone, confirmation_msg)
+    conv.add_message("assistant", confirmation_msg)
+
     if event:
         conv.inject_system_event(
-            f"APPOINTMENT_CONFIRMED: Cita creada exitosamente. "
-            f"Fecha y hora: {formatted_dt}. "
-            f"Da todos los detalles: fecha/hora, direccion completa "
-            f"(Cra 49b #26b-50, Unidad Ciudad Central, Apto 1618, Torre 2, Bello), "
-            f"como llegar en Metro (a pasos de la Estacion Madera), "
-            f"llegar 5-10 min antes, cancelar con 24h de anticipacion."
+            f"APPOINTMENT_CONFIRMED: Cita creada y confirmada al usuario para {formatted_dt}. "
+            f"Ya le enviaste la confirmación con dirección y detalles. "
+            f"Si el usuario responde, sé natural y breve. No repitas la información."
         )
         asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
         # Save success pattern for learning
@@ -513,7 +630,7 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         logger.warning(f"[{conv.phone}] Calendar API returned None — confirming anyway")
         conv.inject_system_event(
             f"APPOINTMENT_CONFIRMED: Cita registrada para {formatted_dt}. "
-            f"Da detalles: fecha/hora, direccion, Metro, llegar antes."
+            f"Ya le enviaste la confirmación. Si responde, sé natural."
         )
         asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
 
@@ -685,10 +802,11 @@ async def send_reminder_if_needed(phone: str) -> bool:
 
     # ---- Day-before reminder (20h to 26h before) ----
     if not conv.reminder_day_before_sent and 72000 <= time_until <= 93600:
+        time_spanish = _format_time_spanish(appointment)
         day_before_msg = (
             f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-            f"para confirmar tu asistencia de mañana {appointment.strftime('%d de')} "
-            f"{_month_name(appointment.month)} a las {appointment.strftime('%I:%M %p').lstrip('0')}.\n\n"
+            f"para confirmar tu asistencia de mañana {appointment.strftime('%d')} de "
+            f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
             f"Por favor confírmanos tu asistencia 🙏\n\n"
             f"Recuerda que estamos ubicados en la Cra 49b #26b-50, Unidad Ciudad Central, "
             f"Apto 1618, Torre 2, Bello (cerca de la Estación Madera del Metro). "
@@ -713,9 +831,10 @@ async def send_reminder_if_needed(phone: str) -> bool:
 
     # ---- Same-day reminder (1.5h to 2.5h before) ----
     if not conv.reminder_sent and 5400 <= time_until <= 9000:
+        time_spanish = _format_time_spanish(appointment)
         reminder_msg = (
             f"{greeting}, te recuerdo que hoy tienes tu valoración con Yésica "
-            f"a las {appointment.strftime('%I:%M %p').lstrip('0')}. "
+            f"a las {time_spanish}. "
             f"Te esperamos en la Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
             f"(cerca de la Estación Madera del Metro). Llega unos minutos antes 😊"
         )
@@ -863,6 +982,22 @@ def _month_name(month: int) -> str:
     }[month]
 
 
+def _format_time_spanish(dt: datetime) -> str:
+    """Format time in Spanish: '4:30 p.m.', '9:00 a.m.', '12:00 p.m.'"""
+    hour = dt.hour
+    minute = dt.strftime("%M")
+    period = "a.m." if hour < 12 else "p.m."
+    if hour == 0:
+        h = 12
+    elif hour > 12:
+        h = hour - 12
+    else:
+        h = hour
+    if minute == "00":
+        return f"{h}:{minute} {period}"
+    return f"{h}:{minute} {period}"
+
+
 def _format_appointment_datetime(dt: datetime) -> str:
     days_es = {
         0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves",
@@ -875,5 +1010,5 @@ def _format_appointment_datetime(dt: datetime) -> str:
     }
     day_name = days_es[dt.weekday()]
     month_name = months_es[dt.month]
-    time_str = dt.strftime("%I:%M %p").lstrip("0")
+    time_str = _format_time_spanish(dt)
     return f"{day_name} {dt.day} de {month_name} a las {time_str}"

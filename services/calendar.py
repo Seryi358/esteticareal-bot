@@ -180,10 +180,10 @@ def group_slots_into_ranges(slots: list[datetime]) -> list[tuple[datetime, datet
 
 
 def _format_hour(dt: datetime) -> str:
-    """Format hour simply: '9am', '2pm', '10:30am'."""
+    """Format hour simply in Spanish: '9 a.m.', '2 p.m.', '10:30 a.m.'"""
     minute = dt.strftime("%M")
     hour = dt.hour
-    period = "am" if hour < 12 else "pm"
+    period = "a.m." if hour < 12 else "p.m."
     if hour == 0:
         h = 12
     elif hour > 12:
@@ -191,8 +191,8 @@ def _format_hour(dt: datetime) -> str:
     else:
         h = hour
     if minute == "00":
-        return f"{h}{period}"
-    return f"{h}:{minute}{period}"
+        return f"{h} {period}"
+    return f"{h}:{minute} {period}"
 
 
 def format_slots_for_whatsapp(slots: list[datetime]) -> str:
