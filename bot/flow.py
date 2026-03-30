@@ -280,6 +280,10 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_parse_slot_selection(conv, text)
         return
 
+    if conv.phase == "awaiting_confirmation":
+        await _handle_slot_confirmation(conv, text)
+        return
+
     if conv.phase == "collecting_data":
         await _try_collect_data_and_schedule(conv)
         return
@@ -306,7 +310,7 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
 
     # ACTION: Check calendar and offer real slots
     if has_calendar_tag and conv.phase not in (
-        "awaiting_slot_selection", "collecting_data",
+        "awaiting_slot_selection", "awaiting_confirmation", "collecting_data",
         "appointment_confirmed", "escalated_to_yesica",
     ):
         logger.info(f"[{conv.phone}] Calendar check triggered by GPT")
@@ -485,20 +489,16 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
         selected_slot = datetime.fromisoformat(selected_iso).replace(tzinfo=COLOMBIA_TZ)
         formatted_dt = _format_appointment_datetime(selected_slot)
         conv.appointment_datetime = selected_slot.isoformat()
-        logger.info(f"[{conv.phone}] GPT parsed slot: {formatted_dt}")
+        conv.phase = "awaiting_confirmation"
+        logger.info(f"[{conv.phone}] GPT parsed slot: {formatted_dt} — awaiting user confirmation")
 
-        has_name = conv.collected_name or conv.user_display_name
-        if has_name:
-            conv.phase = "collecting_data"
-            await _try_collect_data_and_schedule(conv)
-            return
-        else:
-            conv.phase = "collecting_data"
-            conv.inject_system_event(
-                f"El usuario eligió el horario: {formatted_dt}. "
-                f"Necesitas su nombre completo para confirmar la cita. "
-                f"Pídelo de forma natural."
-            )
+        conv.inject_system_event(
+            f"SLOT_SELECTED: El usuario eligió el horario: {formatted_dt}. "
+            f"IMPORTANTE: NO agendes todavía. Primero confirma con el usuario. "
+            f"Pregúntale algo como '¿Te confirmo para el {formatted_dt}?' o "
+            f"'Listo, entonces el {formatted_dt}, ¿te queda bien?'. "
+            f"Espera a que el usuario diga SÍ antes de agendar."
+        )
     else:
         # GPT couldn't parse — let the conversation flow naturally
         conv.inject_system_event(
@@ -506,6 +506,82 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
             "Pregunta de forma natural qué día y hora le queda mejor."
         )
 
+    reply = await _generate_reply(conv)
+    await _send_and_record(conv, reply)
+
+
+# ---------------------------------------------------------------------------
+# Slot confirmation — user must confirm before we book
+# ---------------------------------------------------------------------------
+
+_CONFIRM_YES = [
+    "sí", "si", "sii", "siii", "dale", "de una", "listo", "claro", "perfecto",
+    "genial", "ok", "okay", "va", "eso", "confirma", "confirmar", "confirmame",
+    "confírmame", "por favor", "porfa", "porfavor", "eso está bien", "eso esta bien",
+    "me sirve", "me queda bien", "está bien", "esta bien", "bueno", "yes",
+    "así está bien", "asi esta bien", "me parece", "me parece bien", "súper",
+    "super", "bien", "de acuerdo", "correcto", "exacto", "eso sí", "eso si",
+    "ese", "ese está bien", "ese esta bien", "ese me sirve", "justo",
+    "a esa hora", "a esa hora sí", "a esa hora si", "esa hora",
+]
+
+_CONFIRM_NO = [
+    "no", "noo", "nooo", "nel", "nah", "mejor no", "no me sirve",
+    "no puedo", "ese no", "esa hora no", "ese día no", "ese dia no",
+    "otro", "otra", "cambiar", "diferente", "no me queda",
+]
+
+
+async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
+    """Handle user's yes/no response to the proposed appointment time."""
+    text_lower = text.lower().strip()
+
+    # Check for clear rejection
+    if any(kw in text_lower for kw in _CONFIRM_NO):
+        logger.info(f"[{conv.phone}] User rejected proposed slot")
+        conv.appointment_datetime = None
+        conv.phase = "awaiting_slot_selection"
+        conv.inject_system_event(
+            "SLOT_REJECTED: El usuario NO quiere ese horario. "
+            "Pregunta qué otro día u hora le queda mejor. "
+            "Ofrece otro horario de los disponibles."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
+        return
+
+    # Check for clear confirmation
+    if any(kw in text_lower for kw in _CONFIRM_YES):
+        logger.info(f"[{conv.phone}] User confirmed slot")
+        has_name = conv.collected_name or conv.user_display_name
+        if has_name:
+            conv.phase = "collecting_data"
+            await _try_collect_data_and_schedule(conv)
+        else:
+            conv.phase = "collecting_data"
+            formatted_dt = "pendiente"
+            if conv.appointment_datetime:
+                try:
+                    formatted_dt = _format_appointment_datetime(
+                        datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+                    )
+                except Exception:
+                    pass
+            conv.inject_system_event(
+                f"SLOT_CONFIRMED: El usuario confirmó el horario: {formatted_dt}. "
+                f"Necesitas su nombre completo para agendar la cita. "
+                f"Pídelo de forma natural."
+            )
+            reply = await _generate_reply(conv)
+            await _send_and_record(conv, reply)
+        return
+
+    # Ambiguous — let GPT handle it naturally
+    conv.inject_system_event(
+        "INSTRUCCION: El usuario respondió pero no queda claro si acepta o rechaza "
+        "el horario propuesto. Pregunta de forma natural si le queda bien ese horario "
+        "o si prefiere otro."
+    )
     reply = await _generate_reply(conv)
     await _send_and_record(conv, reply)
 
@@ -554,11 +630,11 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
             uname = conv.user_display_name or conv.collected_name or ""
             greet = f"{uname}, te" if uname else "Te"
             fallback_msg = (
-                f"{greet} confirmo que tu cita quedó agendada para el "
+                f"{greet} confirmo que tu valoración virtual quedó agendada para el "
                 f"{formatted_dt}.\n\n"
-                f"📍 Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
-                f"(cerca de la Estación Madera del Metro).\n\n"
-                f"Llega unos 5-10 minutos antes. Si necesitas cambiarla o cancelarla, "
+                f"📲 Yésica te llamará por videollamada de WhatsApp a este mismo número "
+                f"el día y hora de tu cita.\n\n"
+                f"Asegúrate de tener buena conexión a internet. Si necesitas cambiarla o cancelarla, "
                 f"puedes escribirme directamente por este WhatsApp."
             )
             await evolution.send_text_message(conv.phone, fallback_msg)
@@ -604,11 +680,11 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
     name = conv.user_display_name or conv.collected_name or ""
     greeting = f"{name}, te" if name else "Te"
     confirmation_msg = (
-        f"{greeting} confirmo que tu cita quedó agendada para el "
+        f"{greeting} confirmo que tu valoración virtual quedó agendada para el "
         f"{formatted_dt}.\n\n"
-        f"📍 Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
-        f"(cerca de la Estación Madera del Metro).\n\n"
-        f"Llega unos 5-10 minutos antes. Si necesitas cambiarla o cancelarla, "
+        f"📲 Yésica te llamará por videollamada de WhatsApp a este mismo número "
+        f"el día y hora de tu cita.\n\n"
+        f"Asegúrate de tener buena conexión a internet. Si necesitas cambiarla o cancelarla, "
         f"puedes escribirme directamente por este WhatsApp."
     )
     await evolution.send_text_message(conv.phone, confirmation_msg)
@@ -717,7 +793,7 @@ def _ensure_conversation_alive(reply: str, phase: str) -> str:
         return "¿En qué te puedo ayudar?"
 
     # Don't add questions after: appointment confirmed, escalated, or out-of-zone (instagram link)
-    if phase in ("appointment_confirmed", "escalated_to_yesica", "collecting_data"):
+    if phase in ("appointment_confirmed", "escalated_to_yesica", "collecting_data", "awaiting_confirmation"):
         return reply
     if "instagram.com" in reply.lower():
         return reply
@@ -736,7 +812,7 @@ async def send_followup_if_needed(phone: str) -> bool:
 
     if conv.follow_up_sent:
         return False
-    if conv.phase in ("appointment_confirmed", "collecting_data", "escalated_to_yesica"):
+    if conv.phase in ("appointment_confirmed", "awaiting_confirmation", "collecting_data", "escalated_to_yesica"):
         return False
     if not conv.last_user_message_at:
         return False
@@ -758,8 +834,8 @@ async def send_followup_if_needed(phone: str) -> bool:
     greeting = f"Hola {name}" if name else "Hola"
     followup_msg = (
         f"{greeting}, te escribo porque a Yésica le quedan pocos espacios esta semana "
-        f"para valoraciones. Recuerda que este mes la valoración no tiene costo. "
-        f"¿Qué día te queda más fácil?"
+        f"para valoraciones virtuales. Recuerda que este mes la valoración por videollamada "
+        f"de WhatsApp no tiene costo. ¿Qué día te queda más fácil?"
     )
 
     await evolution.send_text_message(phone, followup_msg)
@@ -805,12 +881,11 @@ async def send_reminder_if_needed(phone: str) -> bool:
         time_spanish = _format_time_spanish(appointment)
         day_before_msg = (
             f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-            f"para confirmar tu asistencia de mañana {appointment.strftime('%d')} de "
+            f"para confirmar tu valoración virtual de mañana {appointment.strftime('%d')} de "
             f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
             f"Por favor confírmanos tu asistencia 🙏\n\n"
-            f"Recuerda que estamos ubicados en la Cra 49b #26b-50, Unidad Ciudad Central, "
-            f"Apto 1618, Torre 2, Bello (cerca de la Estación Madera del Metro). "
-            f"Cualquier duda o inquietud con la dirección nos haces saber para orientarte mejor 😊"
+            f"Recuerda que Yésica te llamará por videollamada de WhatsApp a este mismo número. "
+            f"Asegúrate de tener buena conexión a internet 😊"
         )
         await evolution.send_text_message(phone, day_before_msg)
         conv.add_message("assistant", day_before_msg)
@@ -833,10 +908,10 @@ async def send_reminder_if_needed(phone: str) -> bool:
     if not conv.reminder_sent and 5400 <= time_until <= 9000:
         time_spanish = _format_time_spanish(appointment)
         reminder_msg = (
-            f"{greeting}, te recuerdo que hoy tienes tu valoración con Yésica "
+            f"{greeting}, te recuerdo que hoy tienes tu valoración virtual con Yésica "
             f"a las {time_spanish}. "
-            f"Te esperamos en la Cra 49b #26b-50, Unidad Ciudad Central, Torre 2, Apto 1618, Bello "
-            f"(cerca de la Estación Madera del Metro). Llega unos minutos antes 😊"
+            f"Yésica te llamará por videollamada de WhatsApp a este mismo número. "
+            f"Asegúrate de tener buena conexión a internet 😊"
         )
         await evolution.send_text_message(phone, reminder_msg)
         conv.add_message("assistant", reminder_msg)
@@ -954,13 +1029,14 @@ async def _notify_yesica_appointment(
     settings = get_settings()
     name = conv.collected_name or conv.user_display_name or "Pendiente"
     message = (
-        f"✅ *Nueva valoración agendada*\n\n"
+        f"✅ *Nueva valoración virtual agendada*\n\n"
         f"*Paciente:* {name}\n"
         f"*Teléfono:* +{conv.collected_phone or conv.phone}\n"
         f"*WhatsApp:* +{conv.phone}\n"
         f"*Servicio:* {conv.service_interest or 'Levantamiento de glúteos'}\n"
-        f"*Valoración:* Gratuita (promoción del mes)\n"
+        f"*Valoración:* Gratuita — videollamada de WhatsApp\n"
         f"*Fecha:* {appointment_dt}\n\n"
+        f"Recuerda llamar al cliente por videollamada de WhatsApp el día de la cita 📲\n"
         f"Quedó registrado en tu Google Calendar 📅"
     )
     await evolution.send_text_message(settings.yesica_phone, message)

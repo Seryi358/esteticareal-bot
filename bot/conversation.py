@@ -14,7 +14,7 @@ COLOMBIA_TZ = ZoneInfo("America/Bogota")
 @dataclass
 class ConversationState:
     phone: str
-    phase: str = "chatting"  # chatting | awaiting_slot_selection | collecting_data | appointment_confirmed | escalated_to_yesica
+    phase: str = "chatting"  # chatting | awaiting_slot_selection | awaiting_confirmation | collecting_data | appointment_confirmed | escalated_to_yesica
     user_display_name: Optional[str] = None
     service_interest: Optional[str] = None
     city: Optional[str] = None

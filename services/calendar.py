@@ -309,11 +309,13 @@ async def create_appointment(
         attendees.append({"email": user_email})
 
     event_body = {
-        "summary": f"Valoración {user_name} {user_phone}",
+        "summary": f"📲 Videollamada Valoración {user_name} {user_phone}",
         "description": (
+            f"VALORACIÓN VIRTUAL — Videollamada de WhatsApp\n"
             f"Cliente agendado via WhatsApp Bot\n"
             f"Nombre: {user_name}\n"
             f"Telefono: {user_phone}\n"
+            f"\nRecuerda llamar al cliente por videollamada de WhatsApp a este número."
         ),
         "start": {
             "dateTime": slot.isoformat(),
