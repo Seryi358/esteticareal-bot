@@ -14,7 +14,7 @@ COLOMBIA_TZ = ZoneInfo("America/Bogota")
 @dataclass
 class ConversationState:
     phone: str
-    phase: str = "chatting"  # chatting | awaiting_slot_selection | awaiting_confirmation | collecting_data | appointment_confirmed | escalated_to_yesica
+    phase: str = "chatting"  # chatting | awaiting_slot_selection | awaiting_confirmation | awaiting_meeting_type | collecting_data | appointment_confirmed | escalated_to_yesica
     user_display_name: Optional[str] = None
     service_interest: Optional[str] = None
     city: Optional[str] = None
@@ -25,6 +25,8 @@ class ConversationState:
     collected_email: Optional[str] = None
     calendar_slots_json: Optional[str] = None  # JSON string of available slots
     appointment_datetime: Optional[str] = None
+    meeting_type: Optional[str] = None  # "whatsapp" | "meet"
+    meet_link: Optional[str] = None  # Google Meet URL when meeting_type == "meet"
     offered_pay_at_clinic: bool = False  # True after offering same-day payment
     pay_at_clinic: bool = False  # Legacy field — kept for backward compat
     human_takeover: bool = False  # Legacy — kept for backward compat with saved JSONs

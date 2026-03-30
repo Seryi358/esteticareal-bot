@@ -294,8 +294,14 @@ async def create_appointment(
     user_name: str,
     user_phone: str,
     user_email: str = "",
+    meeting_type: str = "whatsapp",
 ) -> dict | None:
-    """Create a calendar event for the valoracion appointment."""
+    """Create a calendar event for the valoracion appointment.
+
+    Args:
+        meeting_type: "whatsapp" for WhatsApp video call, "meet" for Google Meet link.
+    Returns the created event dict (includes hangoutLink for Meet events).
+    """
     service = _get_service()
     if not service:
         logger.warning("Google Calendar not configured — cannot create appointment")
@@ -308,15 +314,30 @@ async def create_appointment(
     if user_email:
         attendees.append({"email": user_email})
 
-    event_body = {
-        "summary": f"📲 Videollamada Valoración {user_name} {user_phone}",
-        "description": (
+    is_meet = meeting_type == "meet"
+
+    if is_meet:
+        summary = f"💻 Google Meet Valoración {user_name} {user_phone}"
+        description = (
+            f"VALORACIÓN VIRTUAL — Google Meet\n"
+            f"Cliente agendado via WhatsApp Bot\n"
+            f"Nombre: {user_name}\n"
+            f"Telefono: {user_phone}\n"
+            f"\nEl enlace de Meet se genera automáticamente."
+        )
+    else:
+        summary = f"📲 Videollamada Valoración {user_name} {user_phone}"
+        description = (
             f"VALORACIÓN VIRTUAL — Videollamada de WhatsApp\n"
             f"Cliente agendado via WhatsApp Bot\n"
             f"Nombre: {user_name}\n"
             f"Telefono: {user_phone}\n"
             f"\nRecuerda llamar al cliente por videollamada de WhatsApp a este número."
-        ),
+        )
+
+    event_body = {
+        "summary": summary,
+        "description": description,
         "start": {
             "dateTime": slot.isoformat(),
             "timeZone": "America/Bogota",
@@ -335,18 +356,34 @@ async def create_appointment(
         },
     }
 
+    # Add Google Meet conference if requested
+    if is_meet:
+        import uuid
+        event_body["conferenceData"] = {
+            "createRequest": {
+                "requestId": str(uuid.uuid4()),
+                "conferenceSolutionKey": {"type": "hangoutsMeet"},
+            }
+        }
+
     try:
         loop = asyncio.get_running_loop()
+        conference_ver = 1 if is_meet else 0
         event = await asyncio.wait_for(
             loop.run_in_executor(
                 None,
                 lambda: service.events()
-                .insert(calendarId=settings.google_calendar_id, body=event_body)
+                .insert(
+                    calendarId=settings.google_calendar_id,
+                    body=event_body,
+                    conferenceDataVersion=conference_ver,
+                )
                 .execute(),
             ),
             timeout=15,
         )
-        logger.info(f"Calendar event created: {event.get('id')}")
+        meet_link = event.get("hangoutLink", "")
+        logger.info(f"Calendar event created: {event.get('id')}, meet_link={meet_link}")
         return event
     except asyncio.TimeoutError:
         logger.error("Timeout creating calendar event")
