@@ -520,37 +520,32 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
 # Slot confirmation — user must confirm before we book
 # ---------------------------------------------------------------------------
 
-_CONFIRM_YES = [
-    "sí", "si", "sii", "siii", "dale", "de una", "listo", "claro", "perfecto",
-    "genial", "ok", "okay", "va", "eso", "confirma", "confirmar", "confirmame",
-    "confírmame", "por favor", "porfa", "porfavor", "eso está bien", "eso esta bien",
-    "me sirve", "me queda bien", "está bien", "esta bien", "bueno", "yes",
-    "así está bien", "asi esta bien", "me parece", "me parece bien", "súper",
-    "super", "bien", "de acuerdo", "correcto", "exacto", "eso sí", "eso si",
-    "ese", "ese está bien", "ese esta bien", "ese me sirve", "justo",
-    "a esa hora", "a esa hora sí", "a esa hora si", "esa hora",
-    "vale", "chévere", "chevere", "seguro", "totalmente", "definitivamente",
-    "listo entonces", "dale entonces", "ya", "va pues", "hagale", "hágale",
-]
-
-_CONFIRM_NO = [
-    "no", "noo", "nooo", "nel", "nah", "mejor no", "no me sirve",
-    "no puedo", "ese no", "esa hora no", "ese día no", "ese dia no",
-    "otro", "otra", "cambiar", "diferente", "no me queda",
-    "no gracias", "no, gracias", "me toca no", "paso", "nop",
-]
-
 # Counter to avoid infinite ambiguity loops
 _confirmation_attempts: dict[str, int] = {}
 
 
 async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
-    """Handle user's yes/no response to the proposed appointment time."""
-    text_lower = text.lower().strip()
+    """Handle user's yes/no response to the proposed appointment time — GPT interprets."""
+    # Build context for GPT
+    proposed_slot = "pendiente"
+    if conv.appointment_datetime:
+        try:
+            proposed_slot = _format_appointment_datetime(
+                datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+            )
+        except Exception:
+            pass
 
-    # Check for clear rejection FIRST (prevents false positive on "eso NO me sirve")
-    if any(kw in text_lower for kw in _CONFIRM_NO):
-        logger.info(f"[{conv.phone}] User rejected proposed slot")
+    recent_msgs = [m for m in conv.messages[-6:] if m.get("role") in ("user", "assistant")]
+    context = "\n".join(
+        f"{'Usuario' if m['role'] == 'user' else 'Bot'}: {m['content']}"
+        for m in recent_msgs
+    )
+
+    decision = await ai.interpret_confirmation(text, proposed_slot, context)
+
+    if decision == "no":
+        logger.info(f"[{conv.phone}] AI: user rejected proposed slot")
         _confirmation_attempts.pop(conv.phone, None)
         conv.appointment_datetime = None
         conv.phase = "awaiting_slot_selection"
@@ -563,11 +558,9 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
         await _send_and_record(conv, reply)
         return
 
-    # Check for clear confirmation
-    if any(kw in text_lower for kw in _CONFIRM_YES):
-        logger.info(f"[{conv.phone}] User confirmed slot")
+    if decision == "yes":
+        logger.info(f"[{conv.phone}] AI: user confirmed slot")
         _confirmation_attempts.pop(conv.phone, None)
-        # Ask for meeting type preference
         conv.phase = "awaiting_meeting_type"
         conv.inject_system_event(
             "SLOT_CONFIRMED: El usuario confirmó el horario. "
@@ -585,7 +578,6 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
     _confirmation_attempts[conv.phone] = attempts
 
     if attempts >= 3:
-        # After 3 ambiguous attempts, treat as confirmation to unblock
         logger.info(f"[{conv.phone}] 3 ambiguous confirmations — treating as YES")
         _confirmation_attempts.pop(conv.phone, None)
         conv.phase = "awaiting_meeting_type"
@@ -608,35 +600,20 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Meeting type selection — WhatsApp videocall or Google Meet
+# Meeting type selection — WhatsApp videocall or Google Meet (AI-powered)
 # ---------------------------------------------------------------------------
 
-_MEET_KEYWORDS = [
-    "meet", "google meet", "google", "enlace", "link", "por meet",
-    "google meet", "videollamada meet", "con meet", "prefiero meet",
-    "por google", "con google",
-]
-
-_WHATSAPP_KEYWORDS = [
-    "whatsapp", "whats", "wsp", "wp", "por whatsapp", "videollamada whatsapp",
-    "por whats", "con whatsapp", "prefiero whatsapp", "por aquí",
-    "por aqui", "por aca", "por acá", "este mismo", "por este",
-]
+_meeting_type_attempts: dict[str, int] = {}
 
 
 async def _handle_meeting_type_selection(conv: ConversationState, text: str) -> None:
-    """Handle user's choice between WhatsApp videocall and Google Meet."""
-    text_lower = text.lower().strip()
-
-    chosen = None
-    if any(kw in text_lower for kw in _MEET_KEYWORDS):
-        chosen = "meet"
-    elif any(kw in text_lower for kw in _WHATSAPP_KEYWORDS):
-        chosen = "whatsapp"
+    """Handle user's choice between WhatsApp videocall and Google Meet — GPT interprets."""
+    chosen = await ai.interpret_meeting_type(text)
 
     if chosen:
+        _meeting_type_attempts.pop(conv.phone, None)
         conv.meeting_type = chosen
-        logger.info(f"[{conv.phone}] Meeting type chosen: {chosen}")
+        logger.info(f"[{conv.phone}] AI: meeting type chosen: {chosen}")
         has_name = conv.collected_name or conv.user_display_name
         if has_name:
             conv.phase = "collecting_data"
@@ -652,7 +629,28 @@ async def _handle_meeting_type_selection(conv: ConversationState, text: str) -> 
             await _send_and_record(conv, reply)
         return
 
-    # Ambiguous — ask again
+    # Ambiguous — track attempts, default to WhatsApp after 3
+    attempts = _meeting_type_attempts.get(conv.phone, 0) + 1
+    _meeting_type_attempts[conv.phone] = attempts
+
+    if attempts >= 3:
+        logger.info(f"[{conv.phone}] 3 ambiguous meeting type attempts — defaulting to WhatsApp")
+        _meeting_type_attempts.pop(conv.phone, None)
+        conv.meeting_type = "whatsapp"
+        has_name = conv.collected_name or conv.user_display_name
+        if has_name:
+            conv.phase = "collecting_data"
+            await _try_collect_data_and_schedule(conv)
+        else:
+            conv.phase = "collecting_data"
+            conv.inject_system_event(
+                "INSTRUCCION: Procedemos con videollamada de WhatsApp. "
+                "Solo falta el nombre completo del usuario. Pídelo de forma natural."
+            )
+            reply = await _generate_reply(conv)
+            await _send_and_record(conv, reply)
+        return
+
     conv.inject_system_event(
         "INSTRUCCION: El usuario respondió pero no queda claro si prefiere "
         "WhatsApp o Google Meet. Pregunta de forma directa y sencilla: "

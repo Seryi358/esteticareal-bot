@@ -269,6 +269,87 @@ REGLAS:
         return None
 
 
+async def interpret_confirmation(user_message: str, proposed_slot: str, conversation_context: str = "") -> str:
+    """Use GPT to interpret if the user confirms, rejects, or is ambiguous about a proposed slot.
+    Returns: 'yes', 'no', or 'ambiguous'."""
+    context_block = ""
+    if conversation_context:
+        context_block = f"\nConversación reciente:\n{conversation_context}\n"
+
+    prompt = f"""Eres asistente de una clínica estética en Colombia. El bot le propuso al usuario el horario: {proposed_slot}.
+
+El usuario respondió: "{user_message}"
+{context_block}
+¿El usuario ACEPTA, RECHAZA, o su respuesta es AMBIGUA?
+
+Ejemplos de ACEPTACIÓN: "sí", "dale", "listo", "perfecto", "de una", "ok", "claro", "bueno", "va", "eso", "me sirve", "está bien", "súper", "chevere", "hagale", "confirmame", "por favor", "seguro", "ese está bien", "a esa hora sí", "sí claro por favor"
+Ejemplos de RECHAZO: "no", "no puedo", "ese día no", "mejor no", "no me sirve", "otro horario", "cambiar", "no me queda", "paso", "no gracias"
+Ejemplos de AMBIGUO: "mmm", "déjame ver", "no sé", pregunta otra cosa sin relación, responde con información personal
+
+Si el usuario dice "sí pero..." o acepta y agrega algo más, es ACEPTACIÓN.
+Si el usuario pide un horario DIFERENTE al propuesto, es RECHAZO.
+
+Responde SOLO con JSON: {{"decision": "yes"}} o {{"decision": "no"}} o {{"decision": "ambiguous"}}"""
+
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=50,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        if not raw:
+            return "ambiguous"
+        result = json.loads(raw.strip())
+        decision = result.get("decision", "ambiguous")
+        if decision in ("yes", "no", "ambiguous"):
+            logger.info(f"Confirmation interpreted: '{user_message}' → {decision}")
+            return decision
+        return "ambiguous"
+    except Exception as e:
+        logger.error(f"Confirmation interpretation error: {e}")
+        return "ambiguous"
+
+
+async def interpret_meeting_type(user_message: str) -> str | None:
+    """Use GPT to interpret if the user prefers WhatsApp or Google Meet.
+    Returns: 'whatsapp', 'meet', or None if ambiguous."""
+    prompt = f"""El usuario debe elegir entre videollamada de WhatsApp o Google Meet para su cita.
+
+El usuario respondió: "{user_message}"
+
+¿Cuál prefiere?
+
+- Si dice algo como "WhatsApp", "por whats", "por acá", "por aquí", "por este mismo", "videollamada normal" → whatsapp
+- Si dice algo como "Meet", "Google Meet", "por meet", "enlace", "link", "por Google" → meet
+- Si no queda claro → null
+
+Responde SOLO con JSON: {{"choice": "whatsapp"}} o {{"choice": "meet"}} o {{"choice": null}}"""
+
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=50,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        if not raw:
+            return None
+        result = json.loads(raw.strip())
+        choice = result.get("choice")
+        if choice in ("whatsapp", "meet"):
+            logger.info(f"Meeting type interpreted: '{user_message}' → {choice}")
+            return choice
+        return None
+    except Exception as e:
+        logger.error(f"Meeting type interpretation error: {e}")
+        return None
+
+
 async def extract_user_data(messages: list[dict]) -> dict:
     """Extract structured user data (name, phone, email) from recent conversation messages."""
     recent = messages[-10:] if len(messages) > 10 else messages
