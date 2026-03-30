@@ -775,19 +775,18 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         confirmation_msg = (
             f"{greeting} confirmo que tu valoración virtual quedó agendada para el "
             f"{formatted_dt}.\n\n"
-            f"💻 La reunión será por Google Meet. Este es tu enlace único:"
+            f"💻 La reunión será por Google Meet, te comparto tu enlace único"
         )
-        # Send text first, then link separately for clean formatting
-        await evolution.send_text_message(conv.phone, confirmation_msg)
-        await asyncio.sleep(1.0)
-        await evolution.send_text_message(conv.phone, meet_link)
-        await asyncio.sleep(1.0)
         follow_msg = (
             "Entra al enlace el día y hora de tu cita. "
-            "Si necesitas cambiarla o cancelarla, puedes escribirme por este WhatsApp."
+            "Si necesitas cambiarla o cancelarla, puedes escribirme por este WhatsApp 😊"
         )
+        await evolution.send_text_message(conv.phone, confirmation_msg)
+        await asyncio.sleep(1.5)
+        await evolution.send_text_message(conv.phone, meet_link)
+        await asyncio.sleep(1.5)
         await evolution.send_text_message(conv.phone, follow_msg)
-        conv.add_message("assistant", f"{confirmation_msg}\n{meet_link}\n{follow_msg}")
+        conv.add_message("assistant", f"{confirmation_msg} [MSG] {meet_link} [MSG] {follow_msg}")
     else:
         confirmation_msg = (
             f"{greeting} confirmo que tu valoración virtual quedó agendada para el "
@@ -992,24 +991,28 @@ async def send_reminder_if_needed(phone: str) -> bool:
     if not conv.reminder_day_before_sent and 72000 <= time_until <= 93600:
         time_spanish = _format_time_spanish(appointment)
         if meeting_type == "meet" and meet_link:
-            meeting_info = (
-                f"Recuerda que la valoración será por Google Meet. "
-                f"Tu enlace: {meet_link}"
+            day_before_msg = (
+                f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
+                f"para confirmar tu valoración virtual de mañana {appointment.strftime('%d')} de "
+                f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
+                f"Por favor confírmanos tu asistencia 🙏\n\n"
+                f"Recuerda que la valoración será por Google Meet, acá te dejo tu enlace"
             )
+            await evolution.send_text_message(phone, day_before_msg)
+            await asyncio.sleep(1.5)
+            await evolution.send_text_message(phone, meet_link)
+            conv.add_message("assistant", f"{day_before_msg} [MSG] {meet_link}")
         else:
-            meeting_info = (
+            day_before_msg = (
+                f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
+                f"para confirmar tu valoración virtual de mañana {appointment.strftime('%d')} de "
+                f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
+                f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que Yésica te llamará por videollamada de WhatsApp a este mismo número. "
                 f"Asegúrate de tener buena conexión a internet 😊"
             )
-        day_before_msg = (
-            f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-            f"para confirmar tu valoración virtual de mañana {appointment.strftime('%d')} de "
-            f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
-            f"Por favor confírmanos tu asistencia 🙏\n\n"
-            f"{meeting_info}"
-        )
-        await evolution.send_text_message(phone, day_before_msg)
-        conv.add_message("assistant", day_before_msg)
+            await evolution.send_text_message(phone, day_before_msg)
+            conv.add_message("assistant", day_before_msg)
 
         # Notify Yésica
         yesica_day_msg = (
@@ -1029,21 +1032,24 @@ async def send_reminder_if_needed(phone: str) -> bool:
     if not conv.reminder_sent and 5400 <= time_until <= 9000:
         time_spanish = _format_time_spanish(appointment)
         if meeting_type == "meet" and meet_link:
-            meeting_reminder = (
-                f"Entra al enlace de Google Meet a la hora de tu cita:\n{meet_link}"
+            reminder_msg = (
+                f"{greeting}, te recuerdo que hoy tienes tu valoración virtual con Yésica "
+                f"a las {time_spanish}.\n\n"
+                f"Entra a tu enlace de Google Meet a la hora de la cita"
             )
+            await evolution.send_text_message(phone, reminder_msg)
+            await asyncio.sleep(1.5)
+            await evolution.send_text_message(phone, meet_link)
+            conv.add_message("assistant", f"{reminder_msg} [MSG] {meet_link}")
         else:
-            meeting_reminder = (
+            reminder_msg = (
+                f"{greeting}, te recuerdo que hoy tienes tu valoración virtual con Yésica "
+                f"a las {time_spanish}. "
                 f"Yésica te llamará por videollamada de WhatsApp a este mismo número. "
                 f"Asegúrate de tener buena conexión a internet 😊"
             )
-        reminder_msg = (
-            f"{greeting}, te recuerdo que hoy tienes tu valoración virtual con Yésica "
-            f"a las {time_spanish}. "
-            f"{meeting_reminder}"
-        )
-        await evolution.send_text_message(phone, reminder_msg)
-        conv.add_message("assistant", reminder_msg)
+            await evolution.send_text_message(phone, reminder_msg)
+            conv.add_message("assistant", reminder_msg)
 
         # Notify Yésica too
         yesica_msg = (
