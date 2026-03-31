@@ -24,7 +24,9 @@ class ConversationState:
     collected_phone: Optional[str] = None
     collected_email: Optional[str] = None
     calendar_slots_json: Optional[str] = None  # JSON string of available slots
+    slots_fetched_at: Optional[str] = None  # ISO timestamp — when slots were last fetched
     appointment_datetime: Optional[str] = None
+    calendar_event_id: Optional[str] = None  # Google Calendar event ID — for deletion on reschedule
     meeting_type: Optional[str] = None  # "whatsapp" | "meet"
     meet_link: Optional[str] = None  # Google Meet URL when meeting_type == "meet"
     offered_pay_at_clinic: bool = False  # True after offering same-day payment

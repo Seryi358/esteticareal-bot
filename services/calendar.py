@@ -153,6 +153,88 @@ def _overlaps_busy(
     return False
 
 
+async def verify_slot_available(slot: datetime) -> bool:
+    """Re-check Google Calendar right before creating an event.
+
+    Returns True if the slot is still free, False if something was booked there.
+    This prevents double-booking when the user takes time to confirm.
+    """
+    service = _get_service()
+    if not service:
+        # If we can't verify, allow the booking (better than blocking)
+        logger.warning("Cannot verify slot — Calendar not configured")
+        return True
+
+    settings = get_settings()
+    slot_start = slot.astimezone(COLOMBIA_TZ)
+    slot_end = slot_start + timedelta(minutes=SLOT_DURATION_MINUTES)
+
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _check():
+            events_result = service.events().list(
+                calendarId=settings.google_calendar_id,
+                timeMin=slot_start.isoformat(),
+                timeMax=slot_end.isoformat(),
+                singleEvents=True,
+            ).execute()
+            return events_result.get("items", [])
+
+        events = await asyncio.wait_for(
+            loop.run_in_executor(None, _check),
+            timeout=10,
+        )
+
+        # Filter out all-day events
+        timed_events = [
+            ev for ev in events
+            if "dateTime" in ev.get("start", {})
+        ]
+
+        if timed_events:
+            names = [ev.get("summary", "?") for ev in timed_events]
+            logger.warning(
+                f"Slot {slot_start.isoformat()} is NO LONGER available — "
+                f"conflicts with: {names}"
+            )
+            return False
+
+        return True
+    except Exception as e:
+        logger.error(f"Error verifying slot availability: {e}")
+        # On error, allow the booking rather than blocking the user
+        return True
+
+
+async def delete_event(event_id: str) -> bool:
+    """Delete a calendar event by its ID. Used when rescheduling."""
+    service = _get_service()
+    if not service:
+        logger.warning("Cannot delete event — Calendar not configured")
+        return False
+
+    settings = get_settings()
+
+    try:
+        loop = asyncio.get_running_loop()
+        await asyncio.wait_for(
+            loop.run_in_executor(
+                None,
+                lambda: service.events().delete(
+                    calendarId=settings.google_calendar_id,
+                    eventId=event_id,
+                ).execute(),
+            ),
+            timeout=10,
+        )
+        logger.info(f"Calendar event deleted: {event_id}")
+        return True
+    except Exception as e:
+        logger.error(f"Error deleting calendar event {event_id}: {e}")
+        return False
+
+
 def group_slots_into_ranges(slots: list[datetime]) -> list[tuple[datetime, datetime]]:
     """Group consecutive slots into (range_start, range_end) tuples."""
     if not slots:
@@ -220,11 +302,10 @@ def format_slots_for_whatsapp(slots: list[datetime]) -> str:
 
         time_range = f"de {_format_hour(start)} a {_format_hour(end)}"
         if label not in day_ranges:
+            if len(day_ranges) >= 3:
+                break  # Don't start a 4th day
             day_ranges[label] = []
         day_ranges[label].append(time_range)
-
-        if len(day_ranges) >= 3:
-            break
 
     # Format: "mañana de 9am a 12pm y de 2pm a 5pm" or "mañana de 9am a 12pm, y el jueves de 9am a 5pm"
     day_parts = []

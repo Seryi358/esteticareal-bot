@@ -362,10 +362,20 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     text_lower = text.lower()
     needs_evening = any(kw in text_lower for kw in evening_keywords)
 
+    # Delete old calendar event before resetting state
+    if conv.calendar_event_id:
+        deleted = await calendar.delete_event(conv.calendar_event_id)
+        if deleted:
+            logger.info(f"[{conv.phone}] Deleted old calendar event {conv.calendar_event_id}")
+        else:
+            logger.warning(f"[{conv.phone}] Failed to delete old calendar event {conv.calendar_event_id}")
+
     # Reset appointment state
     old_dt = conv.appointment_datetime
     conv.appointment_datetime = None
+    conv.calendar_event_id = None
     conv.calendar_slots_json = None
+    conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
     conv.reminder_sent = False
@@ -475,6 +485,18 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
+
+    # Re-fetch if slots are stale (older than 15 minutes)
+    SLOTS_MAX_AGE_MINUTES = 15
+    if conv.slots_fetched_at:
+        try:
+            fetched = datetime.fromisoformat(conv.slots_fetched_at).replace(tzinfo=COLOMBIA_TZ)
+            age_minutes = (datetime.now(COLOMBIA_TZ) - fetched).total_seconds() / 60
+            if age_minutes > SLOTS_MAX_AGE_MINUTES:
+                logger.info(f"[{conv.phone}] Slots are {age_minutes:.0f}min old — re-fetching")
+                await _fetch_and_inject_slots(conv)
+        except Exception:
+            pass
 
     available_slots = json.loads(conv.calendar_slots_json)
     now_str = datetime.now(COLOMBIA_TZ).strftime("%A %d/%m/%Y %I:%M %p")
@@ -742,12 +764,30 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
 
 
 async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
-    """Create a Google Calendar appointment."""
+    """Create a Google Calendar appointment after re-validating availability."""
     try:
         slot = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
     except Exception as e:
         logger.error(f"Invalid appointment_datetime for {conv.phone}: {e}")
         await _fetch_and_inject_slots(conv)
+        return
+
+    # CRITICAL: Re-validate the slot is still available right before booking
+    is_available = await calendar.verify_slot_available(slot)
+    if not is_available:
+        logger.warning(f"[{conv.phone}] Slot {slot.isoformat()} no longer available — re-fetching")
+        conv.appointment_datetime = None
+        conv.calendar_slots_json = None
+        conv.slots_fetched_at = None
+        conv.inject_system_event(
+            "SLOT_CONFLICT: El horario que el usuario eligió YA NO está disponible — "
+            "alguien más lo ocupó. Discúlpate brevemente y ofrece otro horario cercano. "
+            "NO digas 'error del sistema'. Di algo como 'Ese horario acaba de ser ocupado, "
+            "pero tengo otros disponibles'."
+        )
+        await _fetch_and_inject_slots(conv)
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
         return
 
     meeting_type = conv.meeting_type or "whatsapp"
@@ -760,6 +800,10 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
     )
     formatted_dt = _format_appointment_datetime(slot)
     conv.phase = "appointment_confirmed"
+
+    # Store event ID for future deletion (rescheduling)
+    if event:
+        conv.calendar_event_id = event.get("id")
 
     # Extract Meet link if applicable
     meet_link = ""
@@ -834,6 +878,7 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
 
     if slots:
         conv.calendar_slots_json = json.dumps([s.isoformat() for s in slots])
+        conv.slots_fetched_at = datetime.now(COLOMBIA_TZ).isoformat()
         conv.phase = "awaiting_slot_selection"
         detailed = calendar.format_slots_detailed(slots)
         conv.inject_system_event(
