@@ -292,10 +292,18 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_collect_data_and_schedule(conv)
         return
 
-    # Detect rescheduling/cancellation intent when appointment is already confirmed
+    # Detect rescheduling/cancellation/confirmation when appointment is confirmed
     if conv.phase == "appointment_confirmed":
+        # If reminder was sent and we're awaiting confirmation, handle the response
+        if conv.reminder_confirmation_pending and not conv.reminder_confirmed:
+            handled = await _handle_reminder_response(conv, text)
+            if handled:
+                return
         if _wants_to_reschedule(text):
             await _handle_reschedule(conv, text)
+            return
+        if _wants_to_cancel_only(text):
+            await _handle_cancel(conv)
             return
 
     # Let GPT generate its reply — it decides what to do via tags
@@ -419,6 +427,289 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Reminder response handling — patient confirms or rejects after reminder
+# ---------------------------------------------------------------------------
+
+_CONFIRM_KEYWORDS = [
+    "sí", "si", "confirmo", "confirmado", "ahí estaré", "ahi estare",
+    "ahí estaré", "allí estaré", "alli estare", "claro que sí", "claro que si",
+    "listo", "dale", "perfecto", "por supuesto", "va", "ok", "okay",
+    "de acuerdo", "ahí voy", "ahi voy", "cuenten conmigo", "cuenten con migo",
+    "sí señora", "si señora", "sí claro", "si claro", "claro", "ya",
+    "allá estaré", "alla estare", "confirmo asistencia", "asisto",
+]
+
+_REJECT_KEYWORDS = [
+    "no puedo", "no voy a poder", "no me queda", "no me sirve",
+    "no a esa hora", "a esa hora no", "ese día no", "ese dia no",
+    "me queda difícil", "me queda dificil", "no voy",
+    "no podré", "no podre", "me es imposible",
+    "tengo algo", "se me cruzó", "se me cruzo",
+    "no puedo asistir", "no me es posible",
+]
+
+
+def _is_reminder_confirmation(text: str) -> bool:
+    import re
+    text_lower = text.lower().strip()
+    for kw in _CONFIRM_KEYWORDS:
+        # Use word boundary matching to avoid partial matches (e.g., "si" in "asistir")
+        if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
+            return True
+    return False
+
+
+def _is_reminder_rejection(text: str) -> bool:
+    text_lower = text.lower().strip()
+    return any(kw in text_lower for kw in _REJECT_KEYWORDS)
+
+
+async def _handle_reminder_response(conv: ConversationState, text: str) -> bool:
+    """Handle patient's response to a day-before confirmation reminder.
+    Returns True if the response was handled, False to fall through to normal flow."""
+
+    if _is_reminder_confirmation(text):
+        conv.reminder_confirmed = True
+        conv.reminder_confirmation_pending = False
+        logger.info(f"[{conv.phone}] Patient confirmed appointment after reminder")
+
+        formatted_dt = "pendiente"
+        if conv.appointment_datetime:
+            try:
+                formatted_dt = _format_appointment_datetime(
+                    datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+                )
+            except Exception:
+                pass
+
+        conv.inject_system_event(
+            f"REMINDER_CONFIRMED: La paciente confirmó su asistencia para {formatted_dt}. "
+            f"Responde brevemente agradeciendo la confirmación. Sé cálida y natural. "
+            f"Algo como 'Perfecto, te esperamos' o 'Listo, ahí te esperamos'. "
+            f"NO repitas toda la información de la cita."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
+
+        # Notify Yésica that patient confirmed
+        settings = get_settings()
+        name = conv.collected_name or conv.user_display_name or "Cliente"
+        try:
+            await evolution.send_text_message(
+                settings.yesica_phone,
+                f"✅ *{name}* confirmó asistencia para su cita del {formatted_dt}"
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify Yésica of confirmation: {e}")
+        return True
+
+    if _is_reminder_rejection(text):
+        logger.info(f"[{conv.phone}] Patient rejected appointment after reminder")
+        conv.reminder_confirmation_pending = False
+
+        # Check if they mention a specific new time → reschedule directly
+        time_hints = [
+            "después de las", "despues de las", "a las ", "en la tarde",
+            "en la mañana", "por la mañana", "por la tarde", "mañana",
+            "otro día", "otro dia", "otro horario", "otra hora",
+            "reagendar", "reprogramar", "cambiar",
+        ]
+        text_lower = text.lower()
+        has_time_hint = any(kw in text_lower for kw in time_hints)
+
+        if has_time_hint:
+            await _handle_reschedule(conv, text)
+            return True
+
+        # Pure rejection — cancel and ask if they want to reschedule
+        await _handle_cancel(conv, ask_reschedule=True)
+        return True
+
+    # Ambiguous response — let normal flow handle it
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Pure cancellation — patient wants to cancel without rescheduling
+# ---------------------------------------------------------------------------
+
+_CANCEL_ONLY_KEYWORDS = [
+    "cancelar la cita", "cancelar cita", "cancelo la cita", "cancelo",
+    "quiero cancelar", "deseo cancelar", "necesito cancelar",
+    "ya no puedo ir", "ya no voy", "ya no asisto",
+    "no voy a asistir", "no asistiré", "no asistire",
+]
+
+
+def _wants_to_cancel_only(text: str) -> bool:
+    """Detect if user wants to cancel (not reschedule) their appointment."""
+    text_lower = text.lower()
+    # Must match cancel keywords but NOT contain time preferences
+    has_cancel = any(kw in text_lower for kw in _CANCEL_ONLY_KEYWORDS)
+    if not has_cancel:
+        return False
+    # If they also mention a new time, it's a reschedule not a cancel
+    time_hints = [
+        "otro horario", "otra hora", "otro día", "otro dia",
+        "reagendar", "reprogramar", "mover", "cambiar",
+        "después", "despues", "mañana", "la próxima", "la proxima",
+    ]
+    has_time_hint = any(kw in text_lower for kw in time_hints)
+    return not has_time_hint
+
+
+async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -> None:
+    """Cancel appointment: delete calendar event and optionally ask about rescheduling."""
+    logger.info(f"[{conv.phone}] Cancelling appointment (event_id={conv.calendar_event_id})")
+
+    # Delete calendar event
+    if conv.calendar_event_id:
+        deleted = await calendar.delete_event(conv.calendar_event_id)
+        if deleted:
+            logger.info(f"[{conv.phone}] Calendar event deleted: {conv.calendar_event_id}")
+        else:
+            logger.warning(f"[{conv.phone}] Failed to delete calendar event: {conv.calendar_event_id}")
+            # Retry once
+            await asyncio.sleep(1)
+            deleted = await calendar.delete_event(conv.calendar_event_id)
+            if deleted:
+                logger.info(f"[{conv.phone}] Calendar event deleted on retry: {conv.calendar_event_id}")
+
+    # Reset appointment state
+    old_dt = conv.appointment_datetime
+    conv.appointment_datetime = None
+    conv.calendar_event_id = None
+    conv.calendar_slots_json = None
+    conv.slots_fetched_at = None
+    conv.meeting_type = None
+    conv.meet_link = None
+    conv.reminder_sent = False
+    conv.reminder_day_before_sent = False
+    conv.reminder_confirmation_pending = False
+    conv.reminder_confirmed = False
+    conv.appointment_cancelled = True
+    conv.phase = "chatting"
+
+    if ask_reschedule:
+        conv.inject_system_event(
+            "APPOINTMENT_CANCELLED: La cita fue cancelada y eliminada del calendario. "
+            "Responde con comprensión. Pregunta si le gustaría agendar para otro día y hora. "
+            "Sé breve y empática. Algo como 'Entendido, la cancelo sin problema. "
+            "¿Te gustaría que busquemos otro horario?'"
+        )
+    else:
+        conv.inject_system_event(
+            "APPOINTMENT_CANCELLED: La cita fue cancelada y eliminada del calendario. "
+            "Confirma que la cita quedó cancelada. Sé breve y natural."
+        )
+
+    reply = await _generate_reply(conv)
+    await _send_and_record(conv, reply)
+
+    # Notify Yésica
+    settings = get_settings()
+    name = conv.collected_name or conv.user_display_name or "Cliente"
+    try:
+        await evolution.send_text_message(
+            settings.yesica_phone,
+            f"❌ *Cita cancelada*\n\n"
+            f"*Paciente:* {name}\n"
+            f"*WhatsApp:* +{conv.phone}\n"
+            f"*Cita que tenía:* {old_dt or 'N/A'}\n\n"
+            f"La cita fue eliminada del calendario."
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify Yésica of cancellation: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Auto-cancellation for unconfirmed appointments
+# ---------------------------------------------------------------------------
+
+async def send_auto_cancel_if_needed(phone: str) -> bool:
+    """Auto-cancel appointment if patient didn't confirm after day-before reminder.
+    Triggers 4 hours before the appointment. Returns True if cancelled."""
+    conv = load_conversation(phone)
+
+    if conv.phase != "appointment_confirmed":
+        return False
+    if not conv.appointment_datetime:
+        return False
+    if conv.reminder_confirmed:
+        return False
+    if not conv.reminder_confirmation_pending:
+        return False
+
+    try:
+        appointment = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+    except Exception:
+        return False
+
+    now = datetime.now(COLOMBIA_TZ)
+    time_until = (appointment - now).total_seconds()
+
+    # Auto-cancel if appointment is 3-4 hours away and still not confirmed
+    if not (10800 <= time_until <= 14400):
+        return False
+
+    logger.info(f"[{phone}] Auto-cancelling unconfirmed appointment at {conv.appointment_datetime}")
+
+    # Delete calendar event
+    if conv.calendar_event_id:
+        deleted = await calendar.delete_event(conv.calendar_event_id)
+        if not deleted:
+            await asyncio.sleep(1)
+            await calendar.delete_event(conv.calendar_event_id)
+
+    formatted_dt = _format_appointment_datetime(appointment)
+    name = conv.user_display_name or conv.collected_name or ""
+    greeting = f"{name}, tu" if name else "Tu"
+
+    cancel_msg = (
+        f"{greeting} cita de valoración del {formatted_dt} fue cancelada "
+        f"automáticamente porque no pudimos confirmar tu asistencia.\n\n"
+        f"Si quieres agendar de nuevo, escríbeme y con gusto buscamos un horario 😊"
+    )
+    await evolution.send_text_message(phone, cancel_msg)
+
+    # Reset state
+    old_dt = conv.appointment_datetime
+    conv.appointment_datetime = None
+    conv.calendar_event_id = None
+    conv.calendar_slots_json = None
+    conv.slots_fetched_at = None
+    conv.meeting_type = None
+    conv.meet_link = None
+    conv.reminder_sent = False
+    conv.reminder_day_before_sent = False
+    conv.reminder_confirmation_pending = False
+    conv.reminder_confirmed = False
+    conv.appointment_cancelled = True
+    conv.phase = "chatting"
+    conv.add_message("assistant", cancel_msg)
+    save_conversation(conv)
+
+    # Notify Yésica
+    settings = get_settings()
+    patient_name = conv.collected_name or conv.user_display_name or "Cliente"
+    try:
+        await evolution.send_text_message(
+            settings.yesica_phone,
+            f"⚠️ *Cita auto-cancelada*\n\n"
+            f"*Paciente:* {patient_name}\n"
+            f"*WhatsApp:* +{phone}\n"
+            f"*Cita:* {formatted_dt}\n\n"
+            f"No confirmó asistencia después del recordatorio. "
+            f"El espacio fue liberado en tu calendario."
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify Yésica of auto-cancel: {e}")
+
+    logger.info(f"[{phone}] Auto-cancelled appointment for {formatted_dt}")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Evening/Weekend escalation to Yésica
 # ---------------------------------------------------------------------------
 
@@ -456,7 +747,7 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     # Check if user needs evening/weekend hours — escalate even during slot selection
     evening_keywords = [
         "después de las 5", "despues de las 5", "después de las 6", "despues de las 6",
-        "después de las 7", "despues de las 7", "después de las 4", "despues de las 4",
+        "después de las 7", "despues de las 7",
         "en la noche", "por la noche", "de noche",
         "a las 6", "a las 7", "a las 8", "a las 9",
         "6pm", "7pm", "8pm", "9pm", "6 pm", "7 pm", "8 pm", "9 pm",
@@ -1035,6 +1326,10 @@ async def send_reminder_if_needed(phone: str) -> bool:
     # ---- Day-before reminder (20h to 26h before) ----
     if not conv.reminder_day_before_sent and 72000 <= time_until <= 93600:
         time_spanish = _format_time_spanish(appointment)
+        auto_cancel_notice = (
+            "\n\nEn caso de no recibir confirmación, la cita será cancelada "
+            "automáticamente para darle el espacio a otra paciente."
+        )
         if meeting_type == "meet" and meet_link:
             day_before_msg = (
                 f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
@@ -1042,6 +1337,7 @@ async def send_reminder_if_needed(phone: str) -> bool:
                 f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
                 f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que la valoración será por Google Meet, acá te dejo tu enlace"
+                f"{auto_cancel_notice}"
             )
             await evolution.send_text_message(phone, day_before_msg)
             await asyncio.sleep(1.5)
@@ -1055,6 +1351,7 @@ async def send_reminder_if_needed(phone: str) -> bool:
                 f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que Yésica te llamará por videollamada de WhatsApp a este mismo número. "
                 f"Asegúrate de tener buena conexión a internet 😊"
+                f"{auto_cancel_notice}"
             )
             await evolution.send_text_message(phone, day_before_msg)
             conv.add_message("assistant", day_before_msg)
@@ -1070,6 +1367,7 @@ async def send_reminder_if_needed(phone: str) -> bool:
         await evolution.send_text_message(settings.yesica_phone, yesica_day_msg)
 
         conv.reminder_day_before_sent = True
+        conv.reminder_confirmation_pending = True
         sent_any = True
         logger.info(f"[{phone}] Sent day-before reminder (appointment at {formatted_dt})")
 

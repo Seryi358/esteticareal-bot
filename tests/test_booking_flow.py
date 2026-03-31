@@ -1,10 +1,14 @@
 """Tests for the booking flow — double-booking prevention, stale slots, rescheduling."""
 
 import json
+import os
 import pytest
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from unittest.mock import patch, AsyncMock, MagicMock
+
+# Set required env vars before importing modules that call get_settings()
+os.environ.setdefault("OPENAI_API_KEY", "sk-test-fake-key-for-tests")
 
 from bot.conversation import ConversationState
 
@@ -306,3 +310,295 @@ class TestRescheduleKeywords:
         assert not _wants_to_reschedule("Gracias, nos vemos!")
         assert not _wants_to_reschedule("Perfecto")
         assert not _wants_to_reschedule("Qué tratamientos tienen?")
+
+
+# ---------------------------------------------------------------------------
+# Evening keyword detection — "después de las 4" must NOT escalate
+# ---------------------------------------------------------------------------
+
+
+class TestEveningKeywords:
+    def test_despues_de_las_4_not_evening(self):
+        """4 PM is within business hours — must NOT trigger evening escalation."""
+        # The evening_keywords list in _try_parse_slot_selection should not contain
+        # "después de las 4" since 4 PM < 5 PM (end of business hours)
+        from bot.flow import _try_parse_slot_selection
+        import inspect
+        source = inspect.getsource(_try_parse_slot_selection)
+        assert '"después de las 4"' not in source
+        assert '"despues de las 4"' not in source
+
+    def test_despues_de_las_5_is_evening(self):
+        """5 PM is after business hours — should trigger evening escalation."""
+        from bot.flow import _try_parse_slot_selection
+        import inspect
+        source = inspect.getsource(_try_parse_slot_selection)
+        assert '"después de las 5"' in source
+
+
+# ---------------------------------------------------------------------------
+# Reminder confirmation detection
+# ---------------------------------------------------------------------------
+
+
+class TestReminderConfirmation:
+    def test_confirm_keywords(self):
+        from bot.flow import _is_reminder_confirmation
+        assert _is_reminder_confirmation("Sí, ahí estaré")
+        assert _is_reminder_confirmation("Confirmo")
+        assert _is_reminder_confirmation("Listo")
+        assert _is_reminder_confirmation("Dale")
+        assert _is_reminder_confirmation("Perfecto")
+        assert _is_reminder_confirmation("Ok")
+        assert _is_reminder_confirmation("Claro que sí")
+        assert _is_reminder_confirmation("sí señora")
+
+    def test_reject_keywords(self):
+        from bot.flow import _is_reminder_rejection
+        assert _is_reminder_rejection("No puedo a esa hora")
+        assert _is_reminder_rejection("No voy a poder")
+        assert _is_reminder_rejection("Me queda difícil")
+        assert _is_reminder_rejection("A esa hora no puedo")
+        assert _is_reminder_rejection("No puedo asistir")
+
+    def test_not_confirm_or_reject(self):
+        from bot.flow import _is_reminder_confirmation, _is_reminder_rejection
+        assert not _is_reminder_confirmation("Qué tratamientos tienen?")
+        assert not _is_reminder_rejection("Qué tratamientos tienen?")
+
+    @pytest.mark.asyncio
+    async def test_reminder_confirmation_sets_flags(self):
+        """Confirming after reminder should set reminder_confirmed=True."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_abc",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+        )
+
+        with (
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Perfecto, te esperamos"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+            patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
+        ):
+            handled = await flow._handle_reminder_response(conv, "Sí, ahí estaré")
+
+        assert handled is True
+        assert conv.reminder_confirmed is True
+        assert conv.reminder_confirmation_pending is False
+
+    @pytest.mark.asyncio
+    async def test_reminder_rejection_cancels(self):
+        """Rejecting after reminder should cancel the appointment."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_def",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+        )
+
+        with (
+            patch("bot.flow.calendar.delete_event", new_callable=AsyncMock, return_value=True),
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Entendido, la cancelo"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+            patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
+        ):
+            handled = await flow._handle_reminder_response(conv, "No puedo asistir")
+
+        assert handled is True
+        assert conv.appointment_cancelled is True
+        assert conv.calendar_event_id is None
+
+
+# ---------------------------------------------------------------------------
+# Pure cancellation (cancel-only, no reschedule)
+# ---------------------------------------------------------------------------
+
+
+class TestPureCancellation:
+    def test_cancel_only_keywords(self):
+        from bot.flow import _wants_to_cancel_only
+        assert _wants_to_cancel_only("Quiero cancelar la cita")
+        assert _wants_to_cancel_only("Cancelo la cita")
+        assert _wants_to_cancel_only("Ya no voy a asistir")
+
+    def test_cancel_with_reschedule_intent(self):
+        """If cancel text also mentions rescheduling, it's NOT cancel-only."""
+        from bot.flow import _wants_to_cancel_only
+        assert not _wants_to_cancel_only("Quiero cancelar la cita y reagendar")
+        assert not _wants_to_cancel_only("Cancelo la cita, puedo mañana?")
+        assert not _wants_to_cancel_only("Cancelo, me cambias a otro horario?")
+
+    def test_not_cancel(self):
+        from bot.flow import _wants_to_cancel_only
+        assert not _wants_to_cancel_only("Gracias!")
+        assert not _wants_to_cancel_only("Perfecto, nos vemos")
+        assert not _wants_to_cancel_only("No puedo a esa hora")  # reschedule, not cancel-only
+
+    @pytest.mark.asyncio
+    async def test_cancel_deletes_event_and_notifies(self):
+        """Pure cancellation must delete calendar event and notify Yésica."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_cancel_123",
+            meeting_type="whatsapp",
+        )
+
+        delete_called_with = []
+
+        async def fake_delete(event_id):
+            delete_called_with.append(event_id)
+            return True
+
+        yesica_messages = []
+
+        async def fake_send(phone, text):
+            if "cancelada" in text.lower() or "❌" in text:
+                yesica_messages.append(text)
+
+        with (
+            patch("bot.flow.calendar.delete_event", side_effect=fake_delete),
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Entendido, queda cancelada"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+            patch("bot.flow.evolution.send_text_message", side_effect=fake_send),
+        ):
+            await flow._handle_cancel(conv)
+
+        assert delete_called_with == ["evt_cancel_123"]
+        assert conv.appointment_cancelled is True
+        assert conv.calendar_event_id is None
+        assert conv.phase == "chatting"
+        assert len(yesica_messages) == 1  # Yésica was notified
+
+
+# ---------------------------------------------------------------------------
+# Auto-cancellation of unconfirmed appointments
+# ---------------------------------------------------------------------------
+
+
+class TestAutoCancel:
+    @pytest.mark.asyncio
+    async def test_auto_cancel_triggers_in_window(self):
+        """Unconfirmed appointment 3.5h away should be auto-cancelled."""
+        from bot import flow
+
+        # Appointment 3.5 hours from now (within 3-4h auto-cancel window)
+        appointment_time = datetime.now(COLOMBIA_TZ) + timedelta(hours=3, minutes=30)
+        # Make sure it's a weekday
+        while appointment_time.weekday() > 4:
+            appointment_time += timedelta(days=1)
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=appointment_time.isoformat(),
+            calendar_event_id="evt_auto_cancel",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+            reminder_confirmed=False,
+        )
+
+        with (
+            patch("bot.flow.load_conversation", return_value=conv),
+            patch("bot.flow.save_conversation"),
+            patch("bot.flow.calendar.delete_event", new_callable=AsyncMock, return_value=True),
+            patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
+        ):
+            result = await flow.send_auto_cancel_if_needed("573001234567")
+
+        assert result is True
+        assert conv.appointment_cancelled is True
+        assert conv.phase == "chatting"
+
+    @pytest.mark.asyncio
+    async def test_no_auto_cancel_if_confirmed(self):
+        """Confirmed appointments should NOT be auto-cancelled."""
+        from bot import flow
+
+        appointment_time = datetime.now(COLOMBIA_TZ) + timedelta(hours=3, minutes=30)
+        while appointment_time.weekday() > 4:
+            appointment_time += timedelta(days=1)
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=appointment_time.isoformat(),
+            calendar_event_id="evt_confirmed",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=False,
+            reminder_confirmed=True,
+        )
+
+        with (
+            patch("bot.flow.load_conversation", return_value=conv),
+        ):
+            result = await flow.send_auto_cancel_if_needed("573001234567")
+
+        assert result is False
+
+    @pytest.mark.asyncio
+    async def test_no_auto_cancel_too_early(self):
+        """Appointment 10h away should NOT be auto-cancelled yet."""
+        from bot import flow
+
+        appointment_time = datetime.now(COLOMBIA_TZ) + timedelta(hours=10)
+        while appointment_time.weekday() > 4:
+            appointment_time += timedelta(days=1)
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=appointment_time.isoformat(),
+            calendar_event_id="evt_early",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+        )
+
+        with (
+            patch("bot.flow.load_conversation", return_value=conv),
+        ):
+            result = await flow.send_auto_cancel_if_needed("573001234567")
+
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# ConversationState — new reminder fields
+# ---------------------------------------------------------------------------
+
+
+class TestReminderFields:
+    def test_new_fields_default(self):
+        conv = _make_conv()
+        assert conv.reminder_confirmation_pending is False
+        assert conv.reminder_confirmed is False
+        assert conv.appointment_cancelled is False
+
+    def test_serialization_roundtrip_new_fields(self):
+        conv = _make_conv(
+            reminder_confirmation_pending=True,
+            reminder_confirmed=True,
+            appointment_cancelled=True,
+        )
+        data = conv.to_dict()
+        restored = ConversationState.from_dict(data)
+        assert restored.reminder_confirmation_pending is True
+        assert restored.reminder_confirmed is True
+        assert restored.appointment_cancelled is True
+
+    def test_backward_compat_old_json_no_new_fields(self):
+        old_data = {
+            "phone": "573001234567",
+            "phase": "appointment_confirmed",
+            "messages": [],
+        }
+        conv = ConversationState.from_dict(old_data)
+        assert conv.reminder_confirmation_pending is False
+        assert conv.reminder_confirmed is False
+        assert conv.appointment_cancelled is False

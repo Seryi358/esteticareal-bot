@@ -37,6 +37,9 @@ class ConversationState:
     follow_up_sent: bool = False  # True after automatic 24h follow-up sent
     reminder_sent: bool = False  # True after appointment reminder sent (2h before)
     reminder_day_before_sent: bool = False  # True after day-before reminder sent (24h before)
+    reminder_confirmation_pending: bool = False  # True after day-before reminder, awaiting patient confirmation
+    reminder_confirmed: bool = False  # True when patient confirms attendance after reminder
+    appointment_cancelled: bool = False  # True when appointment is cancelled (not rescheduled)
     messages: list = field(default_factory=list)
 
     def to_dict(self) -> dict:

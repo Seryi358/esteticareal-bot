@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from bot.conversation import load_conversation, save_conversation
-from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed
+from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed, send_auto_cancel_if_needed
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
@@ -61,12 +61,14 @@ REMINDER_CHECK_INTERVAL = 15 * 60
 
 
 async def _reminder_scheduler():
-    """Background loop: checks for upcoming appointments every 15min and sends reminders."""
+    """Background loop: checks for upcoming appointments every 15min and sends reminders.
+    Also handles auto-cancellation of unconfirmed appointments."""
     await asyncio.sleep(120)  # Wait 2min after startup
     while True:
         try:
             conversations_dir = "data/conversations"
             sent = 0
+            cancelled = 0
             for filepath in glob.glob(os.path.join(conversations_dir, "*.json")):
                 phone = os.path.basename(filepath).replace(".json", "")
                 try:
@@ -74,8 +76,13 @@ async def _reminder_scheduler():
                         sent += 1
                 except Exception as e:
                     logger.error(f"Reminder error for {phone}: {e}")
-            if sent > 0:
-                logger.info(f"Reminder scheduler: {sent} reminders sent")
+                try:
+                    if await send_auto_cancel_if_needed(phone):
+                        cancelled += 1
+                except Exception as e:
+                    logger.error(f"Auto-cancel error for {phone}: {e}")
+            if sent > 0 or cancelled > 0:
+                logger.info(f"Reminder scheduler: {sent} reminders sent, {cancelled} auto-cancelled")
         except Exception as e:
             logger.error(f"Reminder scheduler error: {e}")
         await asyncio.sleep(REMINDER_CHECK_INTERVAL)
