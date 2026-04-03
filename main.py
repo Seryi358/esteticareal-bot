@@ -368,7 +368,7 @@ async def _handle_yesica_intervention(
             from services import ai as ai_service, evolution as evo_service
             base64_data = audio_base64
             if not base64_data and audio_key_id:
-                base64_data = await evo_service.get_media_base64(audio_key_id, phone=phone)
+                base64_data = await evo_service.get_media_base64(audio_key_id, phone=phone, from_me=True)
             if base64_data:
                 transcription = await ai_service.transcribe_audio(base64_data)
                 if transcription:

@@ -106,14 +106,14 @@ async def send_typing_presence(phone: str) -> None:
         pass
 
 
-async def get_media_base64(message_key_id: str, phone: str | None = None) -> str | None:
+async def get_media_base64(message_key_id: str, phone: str | None = None, from_me: bool = False) -> str | None:
     """Download and return base64 of a media message."""
     url = f"{_base_url()}/chat/getBase64FromMediaMessage/{_instance()}"
     # Build full message key — Evolution API often needs remoteJid to locate the message
     key_obj: dict = {"id": message_key_id}
     if phone:
         key_obj["remoteJid"] = f"{phone}@s.whatsapp.net"
-        key_obj["fromMe"] = False
+        key_obj["fromMe"] = from_me
     payload = {"message": {"key": key_obj}}
     logger.info(f"Downloading media {message_key_id} for phone={phone}")
     try:
