@@ -1429,7 +1429,7 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
         if meeting_type == "meet" and meet_link:
             day_before_msg = (
                 f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-                f"para confirmar tu valoración virtual de mañana {appointment.strftime('%d')} de "
+                f"para confirmar tu valoración virtual de mañana {appointment.day} de "
                 f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
                 f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que la valoración será por Google Meet, acá te dejo tu enlace"
@@ -1442,7 +1442,7 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
         else:
             day_before_msg = (
                 f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-                f"para confirmar tu valoración virtual de mañana {appointment.strftime('%d')} de "
+                f"para confirmar tu valoración virtual de mañana {appointment.day} de "
                 f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
                 f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que Yésica te llamará por videollamada de WhatsApp a este mismo número. "
@@ -1648,7 +1648,7 @@ def _month_name(month: int) -> str:
 
 
 def _format_time_spanish(dt: datetime) -> str:
-    """Format time in Spanish: '4:30 p.m.', '9:00 a.m.', '12:00 p.m.'"""
+    """Format time in Spanish: '4:30 p.m.', '9 a.m.', '12 p.m.'"""
     hour = dt.hour
     minute = dt.strftime("%M")
     period = "a.m." if hour < 12 else "p.m."
@@ -1659,7 +1659,7 @@ def _format_time_spanish(dt: datetime) -> str:
     else:
         h = hour
     if minute == "00":
-        return f"{h}:{minute} {period}"
+        return f"{h} {period}"
     return f"{h}:{minute} {period}"
 
 
