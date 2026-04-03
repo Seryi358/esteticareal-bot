@@ -1018,7 +1018,7 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
             await _create_appointment_from_saved_slot(conv)
         except Exception as e:
             logger.error(f"[{conv.phone}] Failed to create appointment: {e}", exc_info=True)
-            conv.phase = "appointment_confirmed"
+            # DO NOT confirm phantom appointment — escalate to Yesica instead
             formatted_dt = "pendiente"
             if conv.appointment_datetime:
                 try:
@@ -1027,32 +1027,37 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
                     )
                 except Exception:
                     pass
-            # Send hard-coded confirmation even on calendar API failure
-            uname = conv.user_display_name or conv.collected_name or ""
-            greet = f"{uname}, te" if uname else "Te"
-            mt = conv.meeting_type or "whatsapp"
-            if mt == "meet":
-                fallback_msg = (
-                    f"{greet} confirmo que tu valoración virtual quedó agendada para el "
-                    f"{formatted_dt}.\n\n"
-                    f"💻 Te enviaremos el enlace de Google Meet antes de la cita. "
-                    f"Si necesitas cambiarla o cancelarla, puedes escribirme por este WhatsApp."
-                )
-            else:
-                fallback_msg = (
-                    f"{greet} confirmo que tu valoración virtual quedó agendada para el "
-                    f"{formatted_dt}.\n\n"
-                    f"📲 Yésica te llamará por videollamada de WhatsApp a este mismo número "
-                    f"el día y hora de tu cita.\n\n"
-                    f"Asegúrate de tener buena conexión a internet. Si necesitas cambiarla o cancelarla, "
-                    f"puedes escribirme directamente por este WhatsApp."
-                )
-            await evolution.send_text_message(conv.phone, fallback_msg)
-            conv.add_message("assistant", fallback_msg)
-            conv.inject_system_event(
-                f"APPOINTMENT_CONFIRMED: Cita registrada para {formatted_dt}. "
-                f"Ya le enviaste la confirmación. Si responde, sé natural."
+
+            conv.phase = "chatting"
+            conv.appointment_datetime = None
+            conv.calendar_event_id = None
+
+            error_msg = (
+                "Disculpa, estoy teniendo un inconveniente técnico para registrar "
+                "tu cita en el calendario 😅 Ya le notifico a Yésica para que te "
+                "la confirme directamente. ¡Un momentico!"
             )
+            await evolution.send_text_message(conv.phone, error_msg)
+            conv.add_message("assistant", error_msg)
+
+            # Notify Yesica for manual booking
+            settings = get_settings()
+            name = conv.collected_name or conv.user_display_name or "Cliente"
+            mt = conv.meeting_type or "whatsapp"
+            mt_label = "Google Meet" if mt == "meet" else "Videollamada WhatsApp"
+            try:
+                await evolution.send_text_message(
+                    settings.yesica_phone,
+                    f"⚠️ *Error al agendar — necesita agendamiento manual*\n\n"
+                    f"*Paciente:* {name}\n"
+                    f"*WhatsApp:* +{conv.phone}\n"
+                    f"*Horario solicitado:* {formatted_dt}\n"
+                    f"*Tipo:* {mt_label}\n\n"
+                    f"Error técnico: {str(e)[:100]}\n"
+                    f"Por favor crea el evento manualmente y confirma al paciente."
+                )
+            except Exception:
+                pass
         # Confirmation already sent hard-coded — no GPT reply needed
         return
     elif conv.appointment_datetime and not has_name:
@@ -1077,8 +1082,16 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         await _fetch_and_inject_slots(conv)
         return
 
-    # CRITICAL: Re-validate the slot is still available right before booking
-    is_available = await calendar.verify_slot_available(slot)
+    # CRITICAL: Atomic verify + create under per-slot lock to prevent double-booking.
+    # Two clients selecting the same slot will be serialized — only one wins.
+    meeting_type = conv.meeting_type or "whatsapp"
+    is_available, event = await calendar.book_slot_atomic(
+        slot,
+        conv.collected_name or conv.user_display_name or "Cliente",
+        conv.collected_phone or conv.phone,
+        conv.collected_email or "",
+        meeting_type=meeting_type,
+    )
     if not is_available:
         logger.warning(f"[{conv.phone}] Slot {slot.isoformat()} no longer available — re-fetching")
         conv.appointment_datetime = None
@@ -1094,29 +1107,67 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
-
-    meeting_type = conv.meeting_type or "whatsapp"
-    event = await calendar.create_appointment(
-        slot,
-        conv.collected_name or conv.user_display_name or "Cliente",
-        conv.collected_phone or conv.phone,
-        conv.collected_email or "",
-        meeting_type=meeting_type,
-    )
     formatted_dt = _format_appointment_datetime(slot)
+
+    # ── If event is None, retry once before giving up ──
+    if not event:
+        logger.error(f"[{conv.phone}] Calendar API returned None — retrying once")
+        event = await calendar.create_appointment(
+            slot,
+            conv.collected_name or conv.user_display_name or "Cliente",
+            conv.collected_phone or conv.phone,
+            conv.collected_email or "",
+            meeting_type=meeting_type,
+        )
+        if event:
+            logger.info(f"[{conv.phone}] Calendar event created on retry: {event.get('id')}")
+
+    # ── Calendar truly failed — escalate, do NOT send phantom confirmation ──
+    if not event:
+        logger.error(
+            f"[{conv.phone}] Calendar FAILED after retry — "
+            f"NOT confirming appointment for {formatted_dt}"
+        )
+        conv.phase = "chatting"
+        conv.appointment_datetime = None
+        conv.calendar_event_id = None
+
+        error_msg = (
+            "Disculpa, estoy teniendo un inconveniente técnico para registrar "
+            "tu cita en el calendario 😅 Ya le notifico a Yésica para que te "
+            "la confirme directamente. ¡Un momentico!"
+        )
+        await evolution.send_text_message(conv.phone, error_msg)
+        conv.add_message("assistant", error_msg)
+
+        # Notify Yesica for manual booking
+        settings = get_settings()
+        name = conv.collected_name or conv.user_display_name or "Cliente"
+        mt_label = "Google Meet" if meeting_type == "meet" else "Videollamada WhatsApp"
+        try:
+            await evolution.send_text_message(
+                settings.yesica_phone,
+                f"⚠️ *Error al agendar — necesita agendamiento manual*\n\n"
+                f"*Paciente:* {name}\n"
+                f"*WhatsApp:* +{conv.phone}\n"
+                f"*Horario solicitado:* {formatted_dt}\n"
+                f"*Tipo:* {mt_label}\n\n"
+                f"El calendario no respondió. Por favor crea el evento manualmente "
+                f"y confirma al paciente."
+            )
+        except Exception as e:
+            logger.error(f"Failed to notify Yésica of calendar failure: {e}")
+        return
+
+    # ── Event created successfully — confirm to user ──
     conv.phase = "appointment_confirmed"
+    conv.calendar_event_id = event.get("id")
 
-    # Store event ID for future deletion (rescheduling)
-    if event:
-        conv.calendar_event_id = event.get("id")
-
-    # Extract Meet link if applicable
     meet_link = ""
-    if event and meeting_type == "meet":
+    if meeting_type == "meet":
         meet_link = event.get("hangoutLink", "")
         conv.meet_link = meet_link
 
-    # Send hard-coded confirmation message — never let GPT generate date/time text
     name = conv.user_display_name or conv.collected_name or ""
     greeting = f"{name}, te" if name else "Te"
 
@@ -1148,24 +1199,16 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         await evolution.send_text_message(conv.phone, confirmation_msg)
         conv.add_message("assistant", confirmation_msg)
 
-    if event:
-        conv.inject_system_event(
-            f"APPOINTMENT_CONFIRMED: Cita creada y confirmada al usuario para {formatted_dt}. "
-            f"Tipo: {'Google Meet' if meeting_type == 'meet' else 'videollamada WhatsApp'}. "
-            f"Ya le enviaste la confirmación. "
-            f"Si el usuario responde, sé natural y breve. No repitas la información."
-        )
-        asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
-        asyncio.create_task(
-            asyncio.to_thread(save_success_pattern, conv.phone, conv.messages)
-        )
-    else:
-        logger.warning(f"[{conv.phone}] Calendar API returned None — confirming anyway")
-        conv.inject_system_event(
-            f"APPOINTMENT_CONFIRMED: Cita registrada para {formatted_dt}. "
-            f"Ya le enviaste la confirmación. Si responde, sé natural."
-        )
-        asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
+    conv.inject_system_event(
+        f"APPOINTMENT_CONFIRMED: Cita creada y confirmada al usuario para {formatted_dt}. "
+        f"Tipo: {'Google Meet' if meeting_type == 'meet' else 'videollamada WhatsApp'}. "
+        f"Ya le enviaste la confirmación. "
+        f"Si el usuario responde, sé natural y breve. No repitas la información."
+    )
+    asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
+    asyncio.create_task(
+        asyncio.to_thread(save_success_pattern, conv.phone, conv.messages)
+    )
 
 
 # ---------------------------------------------------------------------------

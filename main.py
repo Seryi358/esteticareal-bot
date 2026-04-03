@@ -108,9 +108,26 @@ app = FastAPI(title="Estetica Real WhatsApp Bot", lifespan=lifespan)
 
 @app.get("/health")
 async def health():
-    from services.calendar import _get_credentials
-    cal_ok = _get_credentials() is not None
-    return {"status": "ok", "bot": "Estetica Real — Valen", "calendar": "connected" if cal_ok else "error"}
+    from services.calendar import _get_credentials, _get_service
+    creds = _get_credentials()
+    cal_status = "error"
+    cal_detail = ""
+    if creds is None:
+        cal_detail = "credentials missing or expired (no refresh_token?)"
+    elif not creds.valid:
+        cal_detail = "credentials invalid after refresh attempt"
+    else:
+        service = _get_service()
+        if service:
+            cal_status = "connected"
+        else:
+            cal_detail = "service build failed"
+    return {
+        "status": "ok",
+        "bot": "Estetica Real — Valen",
+        "calendar": cal_status,
+        "calendar_detail": cal_detail or None,
+    }
 
 
 @app.post("/check-followups")

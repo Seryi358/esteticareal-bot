@@ -1,5 +1,6 @@
 """Tests for the booking flow — double-booking prevention, stale slots, rescheduling."""
 
+import asyncio
 import json
 import os
 import pytest
@@ -93,7 +94,7 @@ class TestDoubleBookingPrevention:
         )
 
         with (
-            patch("bot.flow.calendar.verify_slot_available", new_callable=AsyncMock, return_value=False),
+            patch("bot.flow.calendar.book_slot_atomic", new_callable=AsyncMock, return_value=(False, None)),
             patch("bot.flow.calendar.get_available_slots", new_callable=AsyncMock, return_value=[]),
             patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Ese horario ya no está"),
             patch("bot.flow._send_and_record", new_callable=AsyncMock),
@@ -119,8 +120,7 @@ class TestDoubleBookingPrevention:
         fake_event = {"id": "evt_123", "hangoutLink": ""}
 
         with (
-            patch("bot.flow.calendar.verify_slot_available", new_callable=AsyncMock, return_value=True),
-            patch("bot.flow.calendar.create_appointment", new_callable=AsyncMock, return_value=fake_event),
+            patch("bot.flow.calendar.book_slot_atomic", new_callable=AsyncMock, return_value=(True, fake_event)),
             patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
             patch("bot.flow._notify_yesica_appointment", new_callable=AsyncMock),
             patch("bot.flow.save_success_pattern"),
@@ -129,6 +129,77 @@ class TestDoubleBookingPrevention:
 
         assert conv.phase == "appointment_confirmed"
         assert conv.calendar_event_id == "evt_123"
+
+    @pytest.mark.asyncio
+    async def test_concurrent_booking_only_one_wins(self):
+        """Two clients booking the same slot concurrently: only one must succeed."""
+        from services.calendar import book_slot_atomic, _slot_locks
+
+        slot = _future_slot()
+        _slot_locks.clear()  # Clean state
+
+        # Track how many times create_appointment is called
+        create_calls = []
+
+        async def fake_verify(s):
+            # Simulate slow calendar check — makes race window obvious without lock
+            await asyncio.sleep(0.05)
+            return len(create_calls) == 0  # Free only if nobody created yet
+
+        async def fake_create(s, name, phone, email="", meeting_type="whatsapp"):
+            create_calls.append(phone)
+            return {"id": f"evt_{phone}", "hangoutLink": ""}
+
+        async def fake_check_dups(s, eid):
+            return False
+
+        with (
+            patch("services.calendar.verify_slot_available", side_effect=fake_verify),
+            patch("services.calendar.create_appointment", side_effect=fake_create),
+            patch("services.calendar._check_for_duplicate_events", side_effect=fake_check_dups),
+        ):
+            results = await asyncio.gather(
+                book_slot_atomic(slot, "Maria", "573001111111"),
+                book_slot_atomic(slot, "Laura", "573002222222"),
+            )
+
+        booked = [r for r in results if r[0] is True]
+        rejected = [r for r in results if r[0] is False]
+
+        assert len(booked) == 1, f"Exactly one client should book, got {len(booked)}"
+        assert len(rejected) == 1, f"Exactly one client should be rejected, got {len(rejected)}"
+        assert len(create_calls) == 1, f"create_appointment should be called once, got {len(create_calls)}"
+
+    @pytest.mark.asyncio
+    async def test_different_slots_book_in_parallel(self):
+        """Two clients booking DIFFERENT slots should both succeed (no unnecessary blocking)."""
+        from services.calendar import book_slot_atomic, _slot_locks
+
+        slot_a = _future_slot(hours_ahead=26)
+        slot_b = _future_slot(hours_ahead=28)
+        _slot_locks.clear()
+
+        async def fake_verify(s):
+            return True
+
+        async def fake_create(s, name, phone, email="", meeting_type="whatsapp"):
+            return {"id": f"evt_{phone}", "hangoutLink": ""}
+
+        async def fake_check_dups(s, eid):
+            return False
+
+        with (
+            patch("services.calendar.verify_slot_available", side_effect=fake_verify),
+            patch("services.calendar.create_appointment", side_effect=fake_create),
+            patch("services.calendar._check_for_duplicate_events", side_effect=fake_check_dups),
+        ):
+            results = await asyncio.gather(
+                book_slot_atomic(slot_a, "Maria", "573001111111"),
+                book_slot_atomic(slot_b, "Laura", "573002222222"),
+            )
+
+        booked = [r for r in results if r[0] is True]
+        assert len(booked) == 2, "Different slots should both book successfully"
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,22 @@ BUSINESS_HOURS_END = 17    # 5:00 PM
 SLOT_DURATION_MINUTES = 30  # 30 min slots (2:00, 2:30, 3:00, etc.)
 BUSINESS_DAYS = {0, 1, 2, 3, 4}  # Monday=0 to Friday=4 (Saturday & Sunday excluded)
 
+# ---------------------------------------------------------------------------
+# Slot-level locks to prevent double-booking race conditions.
+# Keyed by slot ISO string — ensures only one booking attempt per slot at a time.
+# ---------------------------------------------------------------------------
+_slot_locks: dict[str, asyncio.Lock] = {}
+_slot_locks_meta_lock = asyncio.Lock()
+
+
+async def _get_slot_lock(slot: datetime) -> asyncio.Lock:
+    """Get or create an asyncio.Lock for a specific time slot."""
+    key = slot.astimezone(COLOMBIA_TZ).replace(second=0, microsecond=0).isoformat()
+    async with _slot_locks_meta_lock:
+        if key not in _slot_locks:
+            _slot_locks[key] = asyncio.Lock()
+        return _slot_locks[key]
+
 
 def _get_credentials() -> Credentials | None:
     import base64, json as _json
@@ -48,13 +64,34 @@ def _get_credentials() -> Credentials | None:
     if creds and creds.expired and creds.refresh_token:
         try:
             creds.refresh(Request())
+            # Persist refreshed token to file
             with open(token_path, "w") as f:
                 f.write(creds.to_json())
+            # Also update in-memory env var so subsequent calls in this process
+            # don't start from the stale base64 token every time
+            try:
+                import base64 as _b64
+                os.environ["GOOGLE_TOKEN_JSON"] = _b64.b64encode(
+                    creds.to_json().encode()
+                ).decode()
+            except Exception:
+                pass  # Non-critical — file fallback still works
+            logger.info("Google credentials refreshed successfully")
         except Exception as e:
             logger.error(f"Error refreshing Google credentials: {e}")
             return None
 
-    return creds if (creds and creds.valid) else None
+    if not creds or not creds.valid:
+        if creds and creds.expired and not creds.refresh_token:
+            logger.error(
+                "Google credentials expired and NO refresh_token available. "
+                "Re-run setup_calendar.py to generate a new token."
+            )
+        else:
+            logger.error("Google credentials invalid or missing")
+        return None
+
+    return creds
 
 
 def _get_service():
@@ -153,17 +190,18 @@ def _overlaps_busy(
     return False
 
 
-async def verify_slot_available(slot: datetime) -> bool:
+async def verify_slot_available(slot: datetime) -> bool | None:
     """Re-check Google Calendar right before creating an event.
 
-    Returns True if the slot is still free, False if something was booked there.
-    This prevents double-booking when the user takes time to confirm.
+    Returns:
+        True — slot is free
+        False — slot is taken (someone booked it)
+        None — calendar unavailable (auth/network failure)
     """
     service = _get_service()
     if not service:
-        # If we can't verify, allow the booking (better than blocking)
-        logger.warning("Cannot verify slot — Calendar not configured")
-        return True
+        logger.error("Cannot verify slot — Calendar not configured (blocking booking)")
+        return None
 
     settings = get_settings()
     slot_start = slot.astimezone(COLOMBIA_TZ)
@@ -203,9 +241,7 @@ async def verify_slot_available(slot: datetime) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error verifying slot availability: {e}")
-        # On error, BLOCK the booking to prevent double-booking.
-        # A transient API failure should not silently bypass the check.
-        return False
+        return None  # Calendar unavailable — let caller handle
 
 
 async def delete_event(event_id: str) -> bool:
@@ -386,7 +422,10 @@ async def create_appointment(
     """
     service = _get_service()
     if not service:
-        logger.warning("Google Calendar not configured — cannot create appointment")
+        logger.error(
+            "Google Calendar NOT configured — cannot create appointment for "
+            f"{user_name} ({user_phone}) at {slot.isoformat()}"
+        )
         return None
 
     settings = get_settings()
@@ -473,3 +512,105 @@ async def create_appointment(
     except Exception as e:
         logger.error(f"Error creating calendar event: {e}")
         return None
+
+
+async def book_slot_atomic(
+    slot: datetime,
+    user_name: str,
+    user_phone: str,
+    user_email: str = "",
+    meeting_type: str = "whatsapp",
+) -> tuple[bool, dict | None]:
+    """Atomically verify availability and create appointment under a per-slot lock.
+
+    Prevents double-booking by ensuring only one coroutine can verify+create
+    for a given time slot at any moment.
+
+    Returns:
+        (is_available, event_or_none):
+            - (True, event_dict) if booked successfully
+            - (False, None) if slot was already taken or calendar is unavailable
+    """
+    lock = await _get_slot_lock(slot)
+
+    async with lock:
+        is_available = await verify_slot_available(slot)
+        if is_available is None:
+            # Calendar service unavailable — cannot verify or create
+            logger.error(
+                f"book_slot_atomic: Calendar unavailable for {slot.isoformat()} "
+                f"({user_phone}) — cannot proceed"
+            )
+            return True, None  # True = slot not taken, None = API failure
+        if not is_available:
+            logger.warning(
+                f"book_slot_atomic: slot {slot.isoformat()} taken "
+                f"(blocked for {user_phone})"
+            )
+            return False, None
+
+        event = await create_appointment(
+            slot, user_name, user_phone, user_email, meeting_type
+        )
+
+        if not event:
+            # Calendar API failed — return True (slot IS available) but None event
+            # so the caller can distinguish "taken" from "API failure"
+            logger.error(
+                f"book_slot_atomic: Calendar API failed for {slot.isoformat()} "
+                f"({user_phone}) — event not created"
+            )
+            return True, None
+
+        # Post-creation safety: verify no duplicates were created
+        has_duplicates = await _check_for_duplicate_events(slot, event.get("id"))
+        if has_duplicates:
+            logger.error(
+                f"DUPLICATE DETECTED for slot {slot.isoformat()} — "
+                f"this should not happen with locking. Keeping our event."
+            )
+
+        return True, event
+
+
+async def _check_for_duplicate_events(
+    slot: datetime, our_event_id: str | None
+) -> bool:
+    """Safety net: check if multiple events exist in the same slot after creation."""
+    service = _get_service()
+    if not service or not our_event_id:
+        return False
+
+    settings = get_settings()
+    slot_start = slot.astimezone(COLOMBIA_TZ)
+    slot_end = slot_start + timedelta(minutes=SLOT_DURATION_MINUTES)
+
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _check():
+            return service.events().list(
+                calendarId=settings.google_calendar_id,
+                timeMin=slot_start.isoformat(),
+                timeMax=slot_end.isoformat(),
+                singleEvents=True,
+            ).execute().get("items", [])
+
+        events = await asyncio.wait_for(
+            loop.run_in_executor(None, _check), timeout=10
+        )
+
+        timed = [
+            ev for ev in events
+            if "dateTime" in ev.get("start", {}) and ev.get("id") != our_event_id
+        ]
+        if timed:
+            logger.error(
+                f"Found {len(timed)} OTHER events in slot "
+                f"{slot_start.isoformat()}: {[e.get('summary') for e in timed]}"
+            )
+            return True
+    except Exception as e:
+        logger.error(f"Error checking for duplicates: {e}")
+
+    return False
