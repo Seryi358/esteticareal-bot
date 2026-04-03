@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 
 from bot.conversation import load_conversation, save_conversation
 from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed, send_auto_cancel_if_needed
+from config import get_settings
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
