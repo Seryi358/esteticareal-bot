@@ -1,10 +1,14 @@
 import asyncio
 import json
+import logging
 import os
+import tempfile
 from dataclasses import dataclass, field, fields, asdict
 from datetime import datetime
 from typing import Optional
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 from config import get_settings
 
@@ -93,15 +97,27 @@ def load_conversation(phone: str) -> ConversationState:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             return ConversationState.from_dict(data)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Failed to load conversation for {phone}: {e}")
             pass
     return ConversationState(phone=phone)
 
 
 def save_conversation(conv: ConversationState) -> None:
     path = _conversation_path(conv.phone)
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(conv.to_dict(), f, ensure_ascii=False, indent=2)
+    dir_name = os.path.dirname(path)
+    try:
+        fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(conv.to_dict(), f, ensure_ascii=False, indent=2)
+        os.replace(tmp_path, path)
+    except Exception as e:
+        logger.error(f"Failed to save conversation for {conv.phone}: {e}")
+        # Clean up temp file if it exists
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
     # Sync key fields to Google Sheets
     try:
