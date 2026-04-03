@@ -391,6 +391,7 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     conv.reminder_confirmation_pending = False
     conv.reminder_confirmed = False
     conv.appointment_cancelled = False
+    conv.follow_up_sent = False  # Allow new follow-up after reschedule
 
     if needs_evening:
         conv.inject_system_event(
@@ -591,6 +592,7 @@ async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -
     conv.reminder_confirmation_pending = False
     conv.reminder_confirmed = False
     conv.appointment_cancelled = True
+    conv.follow_up_sent = False  # Allow new follow-up after cancellation
     conv.phase = "chatting"
 
     if ask_reschedule:
@@ -690,6 +692,7 @@ async def send_auto_cancel_if_needed(phone: str) -> bool:
     conv.reminder_confirmation_pending = False
     conv.reminder_confirmed = False
     conv.appointment_cancelled = True
+    conv.follow_up_sent = False  # Allow new follow-up after auto-cancel
     conv.phase = "chatting"
     conv.add_message("assistant", cancel_msg)
     save_conversation(conv)
