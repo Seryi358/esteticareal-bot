@@ -218,6 +218,10 @@ class TestRescheduling:
             appointment_datetime=_future_slot().isoformat(),
             calendar_event_id="old_evt_456",
             meeting_type="whatsapp",
+            reminder_sent=True,
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+            reminder_confirmed=True,
         )
 
         delete_called_with = []
@@ -238,6 +242,12 @@ class TestRescheduling:
         assert delete_called_with == ["old_evt_456"]
         assert conv.calendar_event_id is None
         assert conv.appointment_datetime is None
+        # Reminder flags must be reset on reschedule
+        assert conv.reminder_sent is False
+        assert conv.reminder_day_before_sent is False
+        assert conv.reminder_confirmation_pending is False
+        assert conv.reminder_confirmed is False
+        assert conv.appointment_cancelled is False
 
     @pytest.mark.asyncio
     async def test_reschedule_without_event_id(self):

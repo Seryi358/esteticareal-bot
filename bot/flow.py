@@ -388,6 +388,9 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     conv.meet_link = None
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
+    conv.reminder_confirmation_pending = False
+    conv.reminder_confirmed = False
+    conv.appointment_cancelled = False
 
     if needs_evening:
         conv.inject_system_event(
