@@ -16,6 +16,20 @@ COLOMBIA_TZ = ZoneInfo("America/Bogota")
 # Cache for push name results to avoid repeated GPT calls for the same name
 _push_name_cache: dict[str, str | None] = {}
 
+# ---------------------------------------------------------------------------
+# Per-phone lock — serializes all conversation reads/writes for the same phone
+# so webhook handlers and background schedulers don't corrupt state.
+# ---------------------------------------------------------------------------
+_phone_locks: dict[str, asyncio.Lock] = {}
+_phone_locks_meta: asyncio.Lock = asyncio.Lock()
+
+
+async def _get_phone_lock(phone: str) -> asyncio.Lock:
+    async with _phone_locks_meta:
+        if phone not in _phone_locks:
+            _phone_locks[phone] = asyncio.Lock()
+        return _phone_locks[phone]
+
 
 # ---------------------------------------------------------------------------
 # Debounce — accumulate rapid messages before processing
@@ -67,36 +81,40 @@ async def process_message(
 
     # Audio — transcribe first, then treat as text
     if message_type == "audioMessage":
-        conv = load_conversation(phone)
-        if resolved_name and not conv.user_display_name:
-            conv.user_display_name = resolved_name
-        try:
-            await _handle_audio(conv, media_key_id, media_base64_inline)
-        except Exception as e:
-            logger.error(f"CRITICAL: Unhandled error in _handle_audio for {phone}: {e}", exc_info=True)
+        lock = await _get_phone_lock(phone)
+        async with lock:
+            conv = load_conversation(phone)
+            if resolved_name and not conv.user_display_name:
+                conv.user_display_name = resolved_name
             try:
-                await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente con el audio 😅 Me lo puedes enviar de nuevo o escribirme?")
-            except Exception:
-                pass
-        finally:
-            save_conversation(conv)
+                await _handle_audio(conv, media_key_id, media_base64_inline)
+            except Exception as e:
+                logger.error(f"CRITICAL: Unhandled error in _handle_audio for {phone}: {e}", exc_info=True)
+                try:
+                    await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente con el audio 😅 Me lo puedes enviar de nuevo o escribirme?")
+                except Exception:
+                    pass
+            finally:
+                save_conversation(conv)
         return
 
     # Images
     if message_type == "imageMessage":
-        conv = load_conversation(phone)
-        if resolved_name and not conv.user_display_name:
-            conv.user_display_name = resolved_name
-        try:
-            await _handle_image(conv, media_key_id, media_base64_inline)
-        except Exception as e:
-            logger.error(f"CRITICAL: Unhandled error in _handle_image for {phone}: {e}", exc_info=True)
+        lock = await _get_phone_lock(phone)
+        async with lock:
+            conv = load_conversation(phone)
+            if resolved_name and not conv.user_display_name:
+                conv.user_display_name = resolved_name
             try:
-                await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente con la imagen 😅 Me la puedes enviar de nuevo?")
-            except Exception:
-                pass
-        finally:
-            save_conversation(conv)
+                await _handle_image(conv, media_key_id, media_base64_inline)
+            except Exception as e:
+                logger.error(f"CRITICAL: Unhandled error in _handle_image for {phone}: {e}", exc_info=True)
+                try:
+                    await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente con la imagen 😅 Me la puedes enviar de nuevo?")
+                except Exception:
+                    pass
+            finally:
+                save_conversation(conv)
         return
 
     # Text messages go through debounce
@@ -130,21 +148,23 @@ async def _fire_after_delay(phone: str, delay: float) -> None:
     if not messages:
         return
 
-    combined = " ".join(messages)
-    conv = load_conversation(phone)
-    if push_name and not conv.user_display_name:
-        conv.user_display_name = push_name
+    lock = await _get_phone_lock(phone)
+    async with lock:
+        combined = " ".join(messages)
+        conv = load_conversation(phone)
+        if push_name and not conv.user_display_name:
+            conv.user_display_name = push_name
 
-    try:
-        await _handle_text(conv, combined)
-    except Exception as e:
-        logger.error(f"CRITICAL: Unhandled error in _handle_text for {phone}: {e}", exc_info=True)
         try:
-            await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente tecnico 😅 Dame un momento y te respondo!")
-        except Exception:
-            pass
-    finally:
-        save_conversation(conv)
+            await _handle_text(conv, combined)
+        except Exception as e:
+            logger.error(f"CRITICAL: Unhandled error in _handle_text for {phone}: {e}", exc_info=True)
+            try:
+                await evolution.send_text_message(phone, "Disculpa, tuve un inconveniente tecnico 😅 Dame un momento y te respondo!")
+            except Exception:
+                pass
+        finally:
+            save_conversation(conv)
 
 
 # ---------------------------------------------------------------------------
@@ -632,8 +652,14 @@ async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -
 # ---------------------------------------------------------------------------
 
 async def send_auto_cancel_if_needed(phone: str) -> bool:
-    """Auto-cancel appointment if patient didn't confirm after day-before reminder.
-    Triggers 4 hours before the appointment. Returns True if cancelled."""
+    """Auto-cancel appointment if patient didn't confirm after reminder."""
+    lock = await _get_phone_lock(phone)
+    async with lock:
+        return await _send_auto_cancel_if_needed_locked(phone)
+
+
+async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
+    """Triggers 3-4 hours before unconfirmed appointments."""
     conv = load_conversation(phone)
 
     if conv.phase != "appointment_confirmed":
@@ -1312,6 +1338,12 @@ def _ensure_conversation_alive(reply: str, phase: str) -> str:
 
 async def send_followup_if_needed(phone: str) -> bool:
     """Check if this conversation needs a 24h follow-up and send it."""
+    lock = await _get_phone_lock(phone)
+    async with lock:
+        return await _send_followup_if_needed_locked(phone)
+
+
+async def _send_followup_if_needed_locked(phone: str) -> bool:
     conv = load_conversation(phone)
 
     if conv.follow_up_sent:
@@ -1355,10 +1387,14 @@ async def send_followup_if_needed(phone: str) -> bool:
 # ---------------------------------------------------------------------------
 
 async def send_reminder_if_needed(phone: str) -> bool:
-    """Check if this conversation has an upcoming appointment and send reminders.
-    - Day-before reminder: sent between 20h and 26h before the appointment.
-    - Same-day reminder: sent between 1.5h and 2.5h before the appointment.
-    Returns True if any reminder was sent."""
+    """Check if this conversation has an upcoming appointment and send reminders."""
+    lock = await _get_phone_lock(phone)
+    async with lock:
+        return await _send_reminder_if_needed_locked(phone)
+
+
+async def _send_reminder_if_needed_locked(phone: str) -> bool:
+    """Day-before reminder: 20h-26h before. Same-day: 1.5h-2.5h before."""
     conv = load_conversation(phone)
 
     if conv.phase != "appointment_confirmed":
@@ -1466,6 +1502,10 @@ async def send_reminder_if_needed(phone: str) -> bool:
         await evolution.send_text_message(settings.yesica_phone, yesica_msg)
 
         conv.reminder_sent = True
+        # Also set confirmation pending so auto-cancel works for same-day bookings
+        # (when day-before reminder window was missed)
+        if not conv.reminder_confirmation_pending:
+            conv.reminder_confirmation_pending = True
         sent_any = True
         logger.info(f"[{phone}] Sent same-day reminder (appointment at {formatted_dt})")
 

@@ -14,7 +14,10 @@ _client: AsyncOpenAI | None = None
 def get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = AsyncOpenAI(api_key=get_settings().openai_api_key)
+        _client = AsyncOpenAI(
+            api_key=get_settings().openai_api_key,
+            timeout=30.0,  # 30s hard timeout — prevents hanging booking flow
+        )
     return _client
 
 
@@ -255,8 +258,9 @@ REGLAS:
                 if diff < best_diff:
                     best_diff = diff
                     best = iso
-            # Accept if within 60 minutes (GPT sometimes picks nearby slots)
-            if best and best_diff <= 3600:
+            # Accept only within 30 minutes (one slot duration) to avoid
+            # booking a significantly different time than what the user asked
+            if best and best_diff <= 1800:
                 logger.info(f"GPT slot fuzzy match: '{user_message}' → {best} (diff={best_diff}s)")
                 return best
         except Exception:
@@ -341,6 +345,8 @@ Responde SOLO con JSON: {{"choice": "whatsapp"}} o {{"choice": "meet"}} o {{"cho
             return None
         result = json.loads(raw.strip())
         choice = result.get("choice")
+        if choice:
+            choice = str(choice).strip().lower()
         if choice in ("whatsapp", "meet"):
             logger.info(f"Meeting type interpreted: '{user_message}' → {choice}")
             return choice

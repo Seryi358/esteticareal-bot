@@ -35,6 +35,12 @@ async def _get_slot_lock(slot: datetime) -> asyncio.Lock:
     """Get or create an asyncio.Lock for a specific time slot."""
     key = slot.astimezone(COLOMBIA_TZ).replace(second=0, microsecond=0).isoformat()
     async with _slot_locks_meta_lock:
+        # Prune old locks (keys for past dates) to prevent memory leak
+        if len(_slot_locks) > 200:
+            now_key = datetime.now(COLOMBIA_TZ).isoformat()
+            stale = [k for k in _slot_locks if k < now_key and not _slot_locks[k].locked()]
+            for k in stale:
+                del _slot_locks[k]
         if key not in _slot_locks:
             _slot_locks[key] = asyncio.Lock()
         return _slot_locks[key]

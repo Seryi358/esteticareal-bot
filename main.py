@@ -20,6 +20,10 @@ TAKEOVER_WINDOW_MINUTES = 5
 # Follow-up scheduler interval (seconds) — check every 4 hours
 FOLLOWUP_CHECK_INTERVAL = 4 * 60 * 60
 
+# Webhook deduplication — Evolution API can retry webhooks on slow responses
+from collections import deque
+_processed_message_ids: deque[str] = deque(maxlen=2000)
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -263,6 +267,12 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     phone = extract_phone(remote_jid)
     if not phone:
         return JSONResponse({"status": "ignored", "reason": "no phone"})
+
+    # Dedup — Evolution API may retry webhook delivery for the same message
+    if message_id and message_id in _processed_message_ids:
+        return JSONResponse({"status": "ignored", "reason": "duplicate"})
+    if message_id:
+        _processed_message_ids.append(message_id)
 
     message_obj: dict = data.get("message", {})
 
