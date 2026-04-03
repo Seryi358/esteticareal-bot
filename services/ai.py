@@ -163,7 +163,7 @@ async def parse_slot_selection(user_message: str, available_slots: list[str], cu
         minute = dt.strftime("%M")
         return f"{h}:{minute} {period}"
 
-    days_es = {0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves", 4: "viernes", 5: "sabado", 6: "domingo"}
+    days_es = {0: "lunes", 1: "martes", 2: "miércoles", 3: "jueves", 4: "viernes", 5: "sábado", 6: "domingo"}
 
     # Build human-readable list — pick first 3 slots per day to keep it compact but cover all days
     from collections import defaultdict

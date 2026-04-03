@@ -327,8 +327,8 @@ def format_slots_for_whatsapp(slots: list[datetime]) -> str:
         return "No hay horarios disponibles en este momento."
 
     days_es = {
-        0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves",
-        4: "viernes", 5: "sabado", 6: "domingo",
+        0: "lunes", 1: "martes", 2: "miércoles", 3: "jueves",
+        4: "viernes", 5: "sábado", 6: "domingo",
     }
 
     now = datetime.now(COLOMBIA_TZ)
@@ -370,8 +370,8 @@ def format_slots_detailed(slots: list[datetime]) -> str:
         return "No hay horarios disponibles."
 
     days_es = {
-        0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves",
-        4: "viernes", 5: "sabado", 6: "domingo",
+        0: "lunes", 1: "martes", 2: "miércoles", 3: "jueves",
+        4: "viernes", 5: "sábado", 6: "domingo",
     }
     now = datetime.now(COLOMBIA_TZ)
 

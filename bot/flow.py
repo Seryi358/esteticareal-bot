@@ -1138,16 +1138,18 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         return
     formatted_dt = _format_appointment_datetime(slot)
 
-    # ── If event is None, retry once before giving up ──
+    # ── If event is None, retry once under slot lock to prevent double-booking ──
     if not event:
-        logger.error(f"[{conv.phone}] Calendar API returned None — retrying once")
-        event = await calendar.create_appointment(
-            slot,
-            conv.collected_name or conv.user_display_name or "Cliente",
-            conv.collected_phone or conv.phone,
-            conv.collected_email or "",
-            meeting_type=meeting_type,
-        )
+        logger.error(f"[{conv.phone}] Calendar API returned None — retrying under lock")
+        slot_lock = await calendar._get_slot_lock(slot)
+        async with slot_lock:
+            event = await calendar.create_appointment(
+                slot,
+                conv.collected_name or conv.user_display_name or "Cliente",
+                conv.collected_phone or conv.phone,
+                conv.collected_email or "",
+                meeting_type=meeting_type,
+            )
         if event:
             logger.info(f"[{conv.phone}] Calendar event created on retry: {event.get('id')}")
 
@@ -1270,6 +1272,7 @@ async def _fetch_and_inject_slots(conv: ConversationState) -> None:
         logger.info(f"Calendar slots fetched for {conv.phone}: {len(slots)} slots")
     else:
         logger.warning(f"No calendar slots found for {conv.phone}")
+        conv.phase = "chatting"  # Reset to chatting so user isn't stuck in collecting_data loop
         conv.inject_system_event(
             "CALENDAR_ERROR: No se encontraron horarios en las proximas 2 semanas. "
             "Dile que revisas la agenda y le confirmas en un momentico. "
@@ -1458,9 +1461,9 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
             await evolution.send_text_message(phone, day_before_msg)
             conv.add_message("assistant", day_before_msg)
 
-        # Notify Yésica
+        # Notify Yésica — use same date phrase as patient message
         yesica_day_msg = (
-            f"📋 *Recordatorio cita mañana*\n\n"
+            f"📋 *Recordatorio cita {_date_phrase}*\n\n"
             f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
             f"*WhatsApp:* +{phone}\n"
             f"*Servicio:* {conv.service_interest or 'Valoración'}\n"
@@ -1474,8 +1477,9 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
         logger.info(f"[{phone}] Sent day-before reminder (appointment at {formatted_dt})")
 
     # ---- Same-day reminder (1.5h to 2.5h before) ----
-    # Skip if patient already confirmed via day-before reminder
-    if not conv.reminder_sent and not conv.reminder_confirmed and 5400 <= time_until <= 9000:
+    # Skip if patient already confirmed via day-before reminder OR if day-before
+    # was sent but patient hasn't responded yet (avoid double-nagging)
+    if not conv.reminder_sent and not conv.reminder_confirmed and not conv.reminder_confirmation_pending and 5400 <= time_until <= 9000:
         time_spanish = _format_time_spanish(appointment)
         if meeting_type == "meet" and meet_link:
             reminder_msg = (
@@ -1528,7 +1532,7 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
 async def _generate_reply(conv: ConversationState) -> str:
     """Build full messages list and call GPT-4o."""
     now_col = datetime.now(COLOMBIA_TZ)
-    days_es = {0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves", 4: "viernes", 5: "sabado", 6: "domingo"}
+    days_es = {0: "lunes", 1: "martes", 2: "miércoles", 3: "jueves", 4: "viernes", 5: "sábado", 6: "domingo"}
     months_es = {1: "enero", 2: "febrero", 3: "marzo", 4: "abril", 5: "mayo", 6: "junio",
                  7: "julio", 8: "agosto", 9: "septiembre", 10: "octubre", 11: "noviembre", 12: "diciembre"}
     fecha_actual = (
@@ -1671,8 +1675,8 @@ def _format_time_spanish(dt: datetime) -> str:
 
 def _format_appointment_datetime(dt: datetime) -> str:
     days_es = {
-        0: "lunes", 1: "martes", 2: "miercoles", 3: "jueves",
-        4: "viernes", 5: "sabado", 6: "domingo",
+        0: "lunes", 1: "martes", 2: "miércoles", 3: "jueves",
+        4: "viernes", 5: "sábado", 6: "domingo",
     }
     months_es = {
         1: "enero", 2: "febrero", 3: "marzo", 4: "abril",
