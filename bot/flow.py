@@ -794,7 +794,15 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
         except Exception:
             pass
 
-    available_slots = json.loads(conv.calendar_slots_json)
+    try:
+        available_slots = json.loads(conv.calendar_slots_json) if conv.calendar_slots_json else []
+    except (json.JSONDecodeError, TypeError):
+        logger.warning(f"[{conv.phone}] Invalid calendar_slots_json, re-fetching")
+        await _fetch_and_inject_slots(conv)
+        try:
+            available_slots = json.loads(conv.calendar_slots_json) if conv.calendar_slots_json else []
+        except (json.JSONDecodeError, TypeError):
+            available_slots = []
     now_str = datetime.now(COLOMBIA_TZ).strftime("%A %d/%m/%Y %I:%M %p")
 
     # Build recent conversation context so GPT knows what user rejected
@@ -993,9 +1001,10 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
         logger.error(f"[{conv.phone}] Data extraction failed: {e}", exc_info=True)
         extracted = {"name": None, "phone": None, "email": None}
 
-    if extracted.get("name"):
+    if extracted.get("name") and extracted["name"].strip():
         conv.collected_name = extracted["name"]
-        conv.user_display_name = extracted["name"].split()[0]
+        parts = extracted["name"].strip().split()
+        conv.user_display_name = parts[0] if parts else extracted["name"]
     if extracted.get("phone"):
         conv.collected_phone = extracted["phone"]
     if extracted.get("email"):
