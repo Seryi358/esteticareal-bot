@@ -1422,6 +1422,14 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
     # ---- Day-before reminder (20h to 26h before) ----
     if not conv.reminder_day_before_sent and 72000 <= time_until <= 93600:
         time_spanish = _format_time_spanish(appointment)
+        # Use actual date comparison to determine "mañana" vs specific date
+        _today = datetime.now(COLOMBIA_TZ).date()
+        _tomorrow = _today + timedelta(days=1)
+        _appt_date = appointment.date()
+        if _appt_date == _tomorrow:
+            _date_phrase = f"mañana {appointment.day} de {_month_name(appointment.month)}"
+        else:
+            _date_phrase = f"el {appointment.day} de {_month_name(appointment.month)}"
         auto_cancel_notice = (
             "\n\nEn caso de no recibir confirmación, la cita será cancelada "
             "automáticamente para darle el espacio a otra paciente."
@@ -1429,8 +1437,7 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
         if meeting_type == "meet" and meet_link:
             day_before_msg = (
                 f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-                f"para confirmar tu valoración virtual de mañana {appointment.day} de "
-                f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
+                f"para confirmar tu valoración virtual de {_date_phrase} a las {time_spanish}.\n\n"
                 f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que la valoración será por Google Meet, acá te dejo tu enlace"
                 f"{auto_cancel_notice}"
@@ -1442,8 +1449,7 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
         else:
             day_before_msg = (
                 f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-                f"para confirmar tu valoración virtual de mañana {appointment.day} de "
-                f"{_month_name(appointment.month)} a las {time_spanish}.\n\n"
+                f"para confirmar tu valoración virtual de {_date_phrase} a las {time_spanish}.\n\n"
                 f"Por favor confírmanos tu asistencia 🙏\n\n"
                 f"Recuerda que Yésica te llamará por videollamada de WhatsApp a este mismo número. "
                 f"Asegúrate de tener buena conexión a internet 😊"
