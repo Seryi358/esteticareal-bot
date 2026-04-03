@@ -130,6 +130,95 @@ async def health():
     }
 
 
+@app.get("/diagnose-calendar")
+async def diagnose_calendar():
+    """Full calendar diagnostic: credentials, read events, create+delete test event."""
+    from services.calendar import (
+        _get_credentials, _get_service, get_available_slots,
+        verify_slot_available, COLOMBIA_TZ,
+    )
+    from datetime import datetime, timedelta
+
+    results = {"steps": [], "errors": []}
+
+    def step_ok(name, detail=""):
+        results["steps"].append({"step": name, "status": "ok", "detail": detail})
+
+    def step_fail(name, detail=""):
+        results["steps"].append({"step": name, "status": "FAIL", "detail": detail})
+        results["errors"].append(f"{name}: {detail}")
+
+    # 1. Credentials
+    creds = _get_credentials()
+    if creds and creds.valid:
+        has_refresh = bool(creds.refresh_token)
+        step_ok("credentials", f"valid=True, has_refresh_token={has_refresh}, expiry={creds.expiry}")
+    else:
+        step_fail("credentials", "None or invalid")
+        results["overall"] = "FAIL"
+        return results
+
+    # 2. Service
+    service = _get_service()
+    if service:
+        step_ok("service", "built successfully")
+    else:
+        step_fail("service", "build returned None")
+        results["overall"] = "FAIL"
+        return results
+
+    # 3. Read events
+    settings = get_settings()
+    cal_id = settings.google_calendar_id
+    now = datetime.now(COLOMBIA_TZ)
+    try:
+        events_result = service.events().list(
+            calendarId=cal_id,
+            timeMin=now.isoformat(),
+            timeMax=(now + timedelta(days=7)).isoformat(),
+            singleEvents=True, orderBy="startTime", maxResults=10,
+        ).execute()
+        events = events_result.get("items", [])
+        event_summaries = [
+            f"{e.get('start',{}).get('dateTime','?')} — {e.get('summary','?')}"
+            for e in events
+        ]
+        step_ok("read_events", f"{len(events)} events in next 7 days: {event_summaries}")
+    except Exception as e:
+        step_fail("read_events", str(e))
+
+    # 4. Write test: create + delete
+    try:
+        test_time = now + timedelta(days=14, hours=3)
+        test_time = test_time.replace(minute=0, second=0, microsecond=0)
+        test_event = {
+            "summary": "TEST diagnose-calendar (auto-delete)",
+            "start": {"dateTime": test_time.isoformat(), "timeZone": "America/Bogota"},
+            "end": {"dateTime": (test_time + timedelta(minutes=30)).isoformat(), "timeZone": "America/Bogota"},
+        }
+        created = service.events().insert(calendarId=cal_id, body=test_event).execute()
+        event_id = created.get("id")
+        step_ok("create_event", f"id={event_id}, start={created.get('start',{}).get('dateTime')}")
+
+        service.events().delete(calendarId=cal_id, eventId=event_id).execute()
+        step_ok("delete_event", f"deleted {event_id}")
+    except Exception as e:
+        step_fail("write_test", str(e))
+
+    # 5. Async pipeline: available slots
+    try:
+        slots = await get_available_slots(days_ahead=7)
+        step_ok("available_slots", f"{len(slots)} slots in next 7 days")
+        if slots:
+            result = await verify_slot_available(slots[0])
+            step_ok("verify_slot", f"slot={slots[0].isoformat()}, available={result}")
+    except Exception as e:
+        step_fail("booking_pipeline", str(e))
+
+    results["overall"] = "FAIL" if results["errors"] else "ALL_OK"
+    return results
+
+
 @app.post("/check-followups")
 async def check_followups():
     """Manual trigger for follow-up checks (also runs automatically every 4h)."""
