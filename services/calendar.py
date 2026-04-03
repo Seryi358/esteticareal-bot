@@ -547,7 +547,7 @@ async def book_slot_atomic(
                 f"book_slot_atomic: Calendar unavailable for {slot.isoformat()} "
                 f"({user_phone}) — cannot proceed"
             )
-            return True, None  # True = slot not taken, None = API failure
+            return False, None  # Cannot verify — treat as unavailable to prevent unverified booking
         if not is_available:
             logger.warning(
                 f"book_slot_atomic: slot {slot.isoformat()} taken "
