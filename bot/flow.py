@@ -299,11 +299,11 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
             handled = await _handle_reminder_response(conv, text)
             if handled:
                 return
-        if _wants_to_reschedule(text):
-            await _handle_reschedule(conv, text)
-            return
         if _wants_to_cancel_only(text):
             await _handle_cancel(conv)
+            return
+        if _wants_to_reschedule(text):
+            await _handle_reschedule(conv, text)
             return
 
     # Let GPT generate its reply — it decides what to do via tags
