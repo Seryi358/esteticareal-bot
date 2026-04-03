@@ -106,6 +106,7 @@ def load_conversation(phone: str) -> ConversationState:
 def save_conversation(conv: ConversationState) -> None:
     path = _conversation_path(conv.phone)
     dir_name = os.path.dirname(path)
+    tmp_path = None
     try:
         fd, tmp_path = tempfile.mkstemp(dir=dir_name, suffix=".tmp")
         with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -114,10 +115,11 @@ def save_conversation(conv: ConversationState) -> None:
     except Exception as e:
         logger.error(f"Failed to save conversation for {conv.phone}: {e}")
         # Clean up temp file if it exists
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     # Sync key fields to Google Sheets
     try:
