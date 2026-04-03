@@ -203,8 +203,9 @@ async def verify_slot_available(slot: datetime) -> bool:
         return True
     except Exception as e:
         logger.error(f"Error verifying slot availability: {e}")
-        # On error, allow the booking rather than blocking the user
-        return True
+        # On error, BLOCK the booking to prevent double-booking.
+        # A transient API failure should not silently bypass the check.
+        return False
 
 
 async def delete_event(event_id: str) -> bool:

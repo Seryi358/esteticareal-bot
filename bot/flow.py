@@ -896,13 +896,13 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
     _confirmation_attempts[conv.phone] = attempts
 
     if attempts >= 3:
-        logger.info(f"[{conv.phone}] 3 ambiguous confirmations — treating as YES")
+        logger.info(f"[{conv.phone}] 3 ambiguous confirmations — asking one final time (NOT auto-booking)")
         _confirmation_attempts.pop(conv.phone, None)
-        conv.phase = "awaiting_meeting_type"
         conv.inject_system_event(
-            "SLOT_CONFIRMED: Asumimos que el usuario acepta el horario. "
-            "Pregúntale cómo prefiere la videollamada: "
-            "por *WhatsApp* o por *Google Meet*."
+            "INSTRUCCION: Llevamos varios intentos sin poder confirmar si el usuario "
+            "acepta o rechaza el horario. Dile algo como: 'Disculpa, no me queda claro. "
+            "¿Te queda bien el horario que te propuse? Respóndeme con un SÍ o un NO, por favor.' "
+            "NO reserves la cita todavía."
         )
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
