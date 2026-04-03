@@ -662,7 +662,9 @@ async def send_auto_cancel_if_needed(phone: str) -> bool:
         deleted = await calendar.delete_event(conv.calendar_event_id)
         if not deleted:
             await asyncio.sleep(1)
-            await calendar.delete_event(conv.calendar_event_id)
+            deleted = await calendar.delete_event(conv.calendar_event_id)
+            if not deleted:
+                logger.error(f"[{phone}] Failed to delete calendar event {conv.calendar_event_id} after retry")
 
     formatted_dt = _format_appointment_datetime(appointment)
     name = conv.user_display_name or conv.collected_name or ""
@@ -1375,7 +1377,8 @@ async def send_reminder_if_needed(phone: str) -> bool:
         logger.info(f"[{phone}] Sent day-before reminder (appointment at {formatted_dt})")
 
     # ---- Same-day reminder (1.5h to 2.5h before) ----
-    if not conv.reminder_sent and 5400 <= time_until <= 9000:
+    # Skip if patient already confirmed via day-before reminder
+    if not conv.reminder_sent and not conv.reminder_confirmed and 5400 <= time_until <= 9000:
         time_spanish = _format_time_spanish(appointment)
         if meeting_type == "meet" and meet_link:
             reminder_msg = (
