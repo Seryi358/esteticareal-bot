@@ -371,7 +371,11 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
             return
 
     # Auto-reset stale escalated_to_yesica phase after 4 hours
-    if conv.phase == "escalated_to_yesica" and conv.escalated_at:
+    if conv.phase == "escalated_to_yesica":
+        if not conv.escalated_at:
+            # escalated_at missing/corrupt — stay silent to be safe
+            logger.warning(f"[{conv.phone}] escalated_to_yesica but escalated_at is missing — bot silent")
+            return
         try:
             esc_time = datetime.fromisoformat(conv.escalated_at).replace(tzinfo=COLOMBIA_TZ)
             hours_since = (datetime.now(COLOMBIA_TZ) - esc_time).total_seconds() / 3600
@@ -389,7 +393,8 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
                 logger.info(f"[{conv.phone}] Escalated to Yésica ({hours_since:.1f}h ago) — bot silent")
                 return
         except Exception as e:
-            logger.error(f"[{conv.phone}] Failed to parse escalated_at '{conv.escalated_at}': {e}")
+            logger.error(f"[{conv.phone}] Failed to parse escalated_at '{conv.escalated_at}': {e} — bot silent")
+            return
 
     # Let GPT generate its reply — it decides what to do via tags
     reply = await _generate_reply(conv)
