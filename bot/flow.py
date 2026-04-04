@@ -15,6 +15,7 @@ COLOMBIA_TZ = ZoneInfo("America/Bogota")
 
 # Cache for push name results to avoid repeated GPT calls for the same name
 _push_name_cache: dict[str, str | None] = {}
+_PUSH_NAME_CACHE_MAX = 500
 
 # ---------------------------------------------------------------------------
 # Per-phone lock — serializes all conversation reads/writes for the same phone
@@ -63,6 +64,11 @@ async def process_message(
     # Extract name from push name using GPT (with cache)
     if push_name and push_name not in _push_name_cache:
         extracted = await ai.extract_name_from_pushname(push_name)
+        # Evict oldest entries when cache exceeds limit
+        if len(_push_name_cache) >= _PUSH_NAME_CACHE_MAX:
+            keys = list(_push_name_cache.keys())
+            for k in keys[:len(keys) // 2]:
+                del _push_name_cache[k]
         _push_name_cache[push_name] = extracted
         logger.info(f"[{phone}] Push name '{push_name}' → '{extracted}'")
     resolved_name = _push_name_cache.get(push_name) if push_name else None
@@ -324,6 +330,7 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
                 conv.reminder_confirmation_pending = False
                 conv.reminder_confirmed = False
                 conv.follow_up_sent = False
+                _clear_attempt_counters(conv.phone)
                 conv.inject_system_event(
                     "APPOINTMENT_COMPLETED: La cita anterior ya pasó. "
                     "Atiende al usuario normalmente. Si quiere agendar una nueva cita, ayúdalo."
@@ -686,6 +693,7 @@ async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -
     conv.follow_up_sent = False  # Allow new follow-up after cancellation
     conv.escalated_at = None  # Clear stale escalation timestamp
     conv.phase = "chatting"
+    _clear_attempt_counters(conv.phone)
 
     if ask_reschedule:
         conv.inject_system_event(
@@ -801,6 +809,7 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
     conv.appointment_cancelled = True
     conv.follow_up_sent = False  # Allow new follow-up after auto-cancel
     conv.phase = "chatting"
+    _clear_attempt_counters(conv.phone)
     conv.add_message("assistant", cancel_msg)
     save_conversation(conv)
 
@@ -1042,6 +1051,13 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
 
 _meeting_type_attempts: dict[str, int] = {}
 _data_collection_attempts: dict[str, int] = {}
+
+
+def _clear_attempt_counters(phone: str) -> None:
+    """Clean up in-memory attempt counters when a booking flow ends or resets."""
+    _confirmation_attempts.pop(phone, None)
+    _meeting_type_attempts.pop(phone, None)
+    _data_collection_attempts.pop(phone, None)
 
 
 async def _handle_meeting_type_selection(conv: ConversationState, text: str) -> None:
