@@ -43,7 +43,7 @@ async def _followup_scheduler():
     await asyncio.sleep(60)
     while True:
         try:
-            conversations_dir = "data/conversations"
+            conversations_dir = get_settings().conversations_dir
             sent = 0
             checked = 0
             for filepath in glob.glob(os.path.join(conversations_dir, "*.json")):
@@ -71,7 +71,7 @@ async def _reminder_scheduler():
     await asyncio.sleep(120)  # Wait 2min after startup
     while True:
         try:
-            conversations_dir = "data/conversations"
+            conversations_dir = get_settings().conversations_dir
             sent = 0
             cancelled = 0
             for filepath in glob.glob(os.path.join(conversations_dir, "*.json")):
@@ -95,7 +95,7 @@ async def _reminder_scheduler():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.makedirs("data/conversations", exist_ok=True)
+    os.makedirs(get_settings().conversations_dir, exist_ok=True)
     os.makedirs("data/learning", exist_ok=True)
     os.makedirs("credentials", exist_ok=True)
     logger.info("Estetica Real Bot (Valen v4) arrancado correctamente")
@@ -227,7 +227,7 @@ async def diagnose_calendar():
 @app.post("/check-followups")
 async def check_followups():
     """Manual trigger for follow-up checks (also runs automatically every 4h)."""
-    conversations_dir = "data/conversations"
+    conversations_dir = get_settings().conversations_dir
     sent = 0
     checked = 0
 
