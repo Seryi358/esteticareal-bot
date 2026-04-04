@@ -708,8 +708,17 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
     now = datetime.now(COLOMBIA_TZ)
     time_until = (appointment - now).total_seconds()
 
-    # Auto-cancel if appointment is 3-4 hours away and still not confirmed
-    if not (10800 <= time_until <= 14400):
+    # Auto-cancel if appointment is 3-4 hours away and still not confirmed.
+    # For same-day bookings where day-before reminder was missed, also trigger
+    # at 1-1.5h before (the same-day reminder fires at 1.5-2.5h, so auto-cancel
+    # needs a later window to give the patient time to respond).
+    standard_window = 10800 <= time_until <= 14400  # 3-4h before
+    sameday_window = (
+        conv.reminder_sent  # same-day reminder was sent
+        and not conv.reminder_day_before_sent  # day-before was missed (short-notice booking)
+        and 3600 <= time_until <= 5400  # 1-1.5h before
+    )
+    if not (standard_window or sameday_window):
         return False
 
     logger.info(f"[{phone}] Auto-cancelling unconfirmed appointment at {conv.appointment_datetime}")
