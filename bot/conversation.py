@@ -72,7 +72,8 @@ class ConversationState:
         if not self.human_takeover_until:
             return False
         try:
-            until = datetime.fromisoformat(self.human_takeover_until).replace(tzinfo=COLOMBIA_TZ)
+            until_raw = datetime.fromisoformat(self.human_takeover_until)
+            until = until_raw if until_raw.tzinfo else until_raw.replace(tzinfo=COLOMBIA_TZ)
             if datetime.now(COLOMBIA_TZ) < until:
                 return True
             # Window expired — clear until but keep human_takeover=True
@@ -131,7 +132,8 @@ def save_conversation(conv: ConversationState) -> None:
         if conv.appointment_datetime:
             try:
                 from datetime import datetime as _dt
-                apt = _dt.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+                apt_raw = _dt.fromisoformat(conv.appointment_datetime)
+                apt = apt_raw if apt_raw.tzinfo else apt_raw.replace(tzinfo=COLOMBIA_TZ)
                 h = apt.hour
                 period = "a.m." if h < 12 else "p.m."
                 h12 = 12 if h == 0 else (h - 12 if h > 12 else h)

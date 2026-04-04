@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 
 from bot.conversation import load_conversation, save_conversation
-from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed, send_auto_cancel_if_needed
+from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed, send_auto_cancel_if_needed, _get_phone_lock
 from config import get_settings
 from services.evolution import extract_phone, is_group_message, is_bot_sent_message
 
@@ -349,40 +349,42 @@ async def _handle_yesica_intervention(
     """
     from bot.learning import save_yesica_message
 
-    conv = load_conversation(phone)
+    lock = await _get_phone_lock(phone)
+    async with lock:
+        conv = load_conversation(phone)
 
-    if text.lower() == RESUME_BOT_COMMAND:
-        conv.human_takeover = False
-        conv.human_takeover_until = None
+        if text.lower() == RESUME_BOT_COMMAND:
+            conv.human_takeover = False
+            conv.human_takeover_until = None
+            save_conversation(conv)
+            logger.info(f"Bot re-enabled immediately for {phone} by Yesica (!bot)")
+            return
+
+        until = datetime.now(COLOMBIA_TZ) + timedelta(minutes=TAKEOVER_WINDOW_MINUTES)
+        conv.human_takeover = True
+        conv.human_takeover_until = until.isoformat()
+
+        # Handle Yésica's audio messages — transcribe and learn from them
+        if audio_base64 or audio_key_id:
+            try:
+                from services import ai as ai_service, evolution as evo_service
+                base64_data = audio_base64
+                if not base64_data and audio_key_id:
+                    base64_data = await evo_service.get_media_base64(audio_key_id, phone=phone, from_me=True)
+                if base64_data:
+                    transcription = await ai_service.transcribe_audio(base64_data)
+                    if transcription:
+                        logger.info(f"Yésica audio transcription for {phone}: '{transcription[:100]}'")
+                        conv.add_message("assistant", transcription)
+                        save_yesica_message(phone, transcription, is_audio=True)
+            except Exception as e:
+                logger.error(f"Error transcribing Yésica's audio for {phone}: {e}")
+        elif text:
+            conv.add_message("assistant", text)
+            save_yesica_message(phone, text, is_audio=False)
+
         save_conversation(conv)
-        logger.info(f"Bot re-enabled immediately for {phone} by Yesica (!bot)")
-        return
-
-    until = datetime.now(COLOMBIA_TZ) + timedelta(minutes=TAKEOVER_WINDOW_MINUTES)
-    conv.human_takeover = True
-    conv.human_takeover_until = until.isoformat()
-
-    # Handle Yésica's audio messages — transcribe and learn from them
-    if audio_base64 or audio_key_id:
-        try:
-            from services import ai as ai_service, evolution as evo_service
-            base64_data = audio_base64
-            if not base64_data and audio_key_id:
-                base64_data = await evo_service.get_media_base64(audio_key_id, phone=phone, from_me=True)
-            if base64_data:
-                transcription = await ai_service.transcribe_audio(base64_data)
-                if transcription:
-                    logger.info(f"Yésica audio transcription for {phone}: '{transcription[:100]}'")
-                    conv.add_message("assistant", transcription)
-                    save_yesica_message(phone, transcription, is_audio=True)
-        except Exception as e:
-            logger.error(f"Error transcribing Yésica's audio for {phone}: {e}")
-    elif text:
-        conv.add_message("assistant", text)
-        save_yesica_message(phone, text, is_audio=False)
-
-    save_conversation(conv)
-    logger.info(f"Human takeover for {phone} — bot silent until {until.strftime('%H:%M:%S')}")
+        logger.info(f"Human takeover for {phone} — bot silent until {until.strftime('%H:%M:%S')}")
 
 
 # ---------------------------------------------------------------------------
