@@ -877,6 +877,8 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
 # Slot selection → appointment booking (no payment required)
 # ---------------------------------------------------------------------------
 
+_slot_selection_attempts: dict[str, int] = {}
+
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     """User is picking a time slot. GPT parses the selection."""
     # Check if user needs evening/weekend hours — escalate even during slot selection
@@ -948,6 +950,7 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
     selected_iso = await ai.parse_slot_selection(text, available_slots, now_str, recent_context)
 
     if selected_iso:
+        _slot_selection_attempts.pop(conv.phone, None)
         selected_slot = datetime.fromisoformat(selected_iso).replace(tzinfo=COLOMBIA_TZ)
         formatted_dt = _format_appointment_datetime(selected_slot)
         conv.appointment_datetime = selected_slot.isoformat()
@@ -962,7 +965,22 @@ async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
             f"Espera a que el usuario diga SÍ antes de agendar."
         )
     else:
-        # GPT couldn't parse — let the conversation flow naturally
+        # GPT couldn't parse — track attempts to avoid infinite loop
+        slot_attempts = _slot_selection_attempts.get(conv.phone, 0) + 1
+        _slot_selection_attempts[conv.phone] = slot_attempts
+
+        if slot_attempts >= 5:
+            logger.warning(f"[{conv.phone}] 5 failed slot selections — escalating to Yésica")
+            _slot_selection_attempts.pop(conv.phone, None)
+            conv.inject_system_event(
+                "INSTRUCCION: No hemos podido identificar un horario después de varios intentos. "
+                "Dile al usuario que lo comunicamos con Yésica para coordinar directamente."
+            )
+            reply = await _generate_reply(conv)
+            await _send_and_record(conv, reply)
+            await _escalate_to_yesica_evening(conv, text)
+            return
+
         conv.inject_system_event(
             "INSTRUCCION: El usuario respondió pero no se identificó un horario claro. "
             "Pregunta de forma natural qué día y hora le queda mejor."
@@ -1033,9 +1051,22 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
     attempts = _confirmation_attempts.get(conv.phone, 0) + 1
     _confirmation_attempts[conv.phone] = attempts
 
+    if attempts >= 6:
+        # After 6 ambiguous attempts (2 full cycles), give up and escalate
+        logger.warning(f"[{conv.phone}] 6 ambiguous confirmations — escalating to Yésica")
+        _confirmation_attempts.pop(conv.phone, None)
+        conv.appointment_datetime = None
+        conv.inject_system_event(
+            "INSTRUCCION: No hemos podido confirmar el horario después de varios intentos. "
+            "Dile al usuario que lo comunicamos con Yésica para que coordinen directamente."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
+        await _escalate_to_yesica_evening(conv, text)
+        return
+
     if attempts >= 3:
         logger.info(f"[{conv.phone}] 3 ambiguous confirmations — asking one final time (NOT auto-booking)")
-        _confirmation_attempts.pop(conv.phone, None)
         conv.inject_system_event(
             "INSTRUCCION: Llevamos varios intentos sin poder confirmar si el usuario "
             "acepta o rechaza el horario. Dile algo como: 'Disculpa, no me queda claro. "
@@ -1065,6 +1096,7 @@ _data_collection_attempts: dict[str, int] = {}
 
 def _clear_attempt_counters(phone: str) -> None:
     """Clean up in-memory attempt counters when a booking flow ends or resets."""
+    _slot_selection_attempts.pop(phone, None)
     _confirmation_attempts.pop(phone, None)
     _meeting_type_attempts.pop(phone, None)
     _data_collection_attempts.pop(phone, None)
