@@ -1222,13 +1222,23 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         logger.error(f"[{conv.phone}] Calendar API returned None — retrying under lock")
         slot_lock = await calendar._get_slot_lock(slot)
         async with slot_lock:
-            event = await calendar.create_appointment(
-                slot,
-                conv.collected_name or conv.user_display_name or "Cliente",
-                conv.collected_phone or conv.phone,
-                conv.collected_email or "",
-                meeting_type=meeting_type,
-            )
+            # Re-verify availability: another client may have booked during the
+            # window between book_slot_atomic releasing its lock and this retry.
+            still_available = await calendar.verify_slot_available(slot)
+            if still_available is None or not still_available:
+                logger.warning(
+                    f"[{conv.phone}] Slot {slot.isoformat()} no longer available on retry "
+                    f"(verify={still_available}) — aborting retry"
+                )
+                event = None  # force escalation path below
+            else:
+                event = await calendar.create_appointment(
+                    slot,
+                    conv.collected_name or conv.user_display_name or "Cliente",
+                    conv.collected_phone or conv.phone,
+                    conv.collected_email or "",
+                    meeting_type=meeting_type,
+                )
         if event:
             logger.info(f"[{conv.phone}] Calendar event created on retry: {event.get('id')}")
 
