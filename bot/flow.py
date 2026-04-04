@@ -311,6 +311,12 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     conv.add_message("user", text)
     conv.last_user_message_at = datetime.now(COLOMBIA_TZ).isoformat()
 
+    # Re-check human takeover (may have been set during debounce window)
+    if conv.is_human_takeover_active():
+        logger.info(f"[{conv.phone}] Human takeover active at _handle_text entry — bot silent")
+        save_conversation(conv)
+        return
+
     # Auto-reset past appointments — if the appointment already happened,
     # free the patient so they can start a new booking flow naturally.
     if conv.phase == "appointment_confirmed" and conv.appointment_datetime:
@@ -380,9 +386,13 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     # Auto-reset stale escalated_to_yesica phase after 4 hours
     if conv.phase == "escalated_to_yesica":
         if not conv.escalated_at:
-            # escalated_at missing/corrupt — stay silent to be safe
-            logger.warning(f"[{conv.phone}] escalated_to_yesica but escalated_at is missing — bot silent")
-            return
+            # escalated_at missing/corrupt — auto-reset to avoid permanent silence
+            logger.warning(f"[{conv.phone}] escalated_to_yesica but escalated_at is missing — auto-resetting")
+            conv.phase = "chatting"
+            conv.escalated_at = None
+            conv.inject_system_event(
+                "FASE_RESET: Escalación a Yésica sin timestamp — retomando conversación."
+            )
         try:
             esc_time = datetime.fromisoformat(conv.escalated_at).replace(tzinfo=COLOMBIA_TZ)
             hours_since = (datetime.now(COLOMBIA_TZ) - esc_time).total_seconds() / 3600

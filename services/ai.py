@@ -249,11 +249,14 @@ REGLAS:
 
         # Fuzzy match — find closest slot to what GPT returned
         try:
-            target = datetime.fromisoformat(selected).replace(tzinfo=COLOMBIA_TZ)
+            target_raw = datetime.fromisoformat(selected)
+            # Use astimezone for tz-aware (safe if GPT changes offset), replace for naive
+            target = target_raw.astimezone(COLOMBIA_TZ) if target_raw.tzinfo else target_raw.replace(tzinfo=COLOMBIA_TZ)
             best = None
             best_diff = float("inf")
             for iso in available_slots:
-                slot_dt = datetime.fromisoformat(iso).replace(tzinfo=COLOMBIA_TZ)
+                slot_raw = datetime.fromisoformat(iso)
+                slot_dt = slot_raw.astimezone(COLOMBIA_TZ) if slot_raw.tzinfo else slot_raw.replace(tzinfo=COLOMBIA_TZ)
                 diff = abs((slot_dt - target).total_seconds())
                 if diff < best_diff:
                     best_diff = diff
