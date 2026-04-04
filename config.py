@@ -1,8 +1,11 @@
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from functools import lru_cache
 
 
 class Settings(BaseSettings):
+    model_config = ConfigDict(env_file=".env", env_file_encoding="utf-8")
+
     # OpenAI
     openai_api_key: str
 
@@ -34,10 +37,6 @@ class Settings(BaseSettings):
     # Paths
     conversations_dir: str = "data/conversations"
     credentials_dir: str = "credentials"
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
 
 
 @lru_cache
