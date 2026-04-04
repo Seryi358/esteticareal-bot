@@ -573,10 +573,8 @@ class TestAutoCancel:
         from bot import flow
 
         # Appointment 3.5 hours from now (within 3-4h auto-cancel window)
+        # Note: auto-cancel checks time_until only, not weekday
         appointment_time = datetime.now(COLOMBIA_TZ) + timedelta(hours=3, minutes=30)
-        # Make sure it's a weekday
-        while appointment_time.weekday() > 4:
-            appointment_time += timedelta(days=1)
 
         conv = _make_conv(
             phase="appointment_confirmed",
