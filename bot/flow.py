@@ -313,6 +313,14 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         return
 
     if conv.phase == "collecting_data":
+        attempts = _data_collection_attempts.get(conv.phone, 0) + 1
+        _data_collection_attempts[conv.phone] = attempts
+        if attempts >= 5:
+            # After 5 attempts without extracting a name, use fallback
+            logger.warning(f"[{conv.phone}] 5 data collection attempts — using fallback name")
+            _data_collection_attempts.pop(conv.phone, None)
+            if not conv.collected_name and not conv.user_display_name:
+                conv.collected_name = "Cliente"
         await _try_collect_data_and_schedule(conv)
         return
 
@@ -981,6 +989,7 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
 # ---------------------------------------------------------------------------
 
 _meeting_type_attempts: dict[str, int] = {}
+_data_collection_attempts: dict[str, int] = {}
 
 
 async def _handle_meeting_type_selection(conv: ConversationState, text: str) -> None:
@@ -1056,6 +1065,7 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
         conv.collected_name = extracted["name"]
         parts = extracted["name"].strip().split()
         conv.user_display_name = parts[0] if parts else extracted["name"]
+        _data_collection_attempts.pop(conv.phone, None)  # Name found — clear counter
     if extracted.get("phone"):
         conv.collected_phone = extracted["phone"]
     if extracted.get("email"):
