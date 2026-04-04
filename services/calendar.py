@@ -438,6 +438,11 @@ async def create_appointment(
         )
         return None
 
+    # Same defensive check as verify_slot_available — ensure timezone-aware
+    if slot.tzinfo is None:
+        logger.warning(f"create_appointment: naive datetime {slot.isoformat()}, assuming America/Bogota")
+        slot = slot.replace(tzinfo=COLOMBIA_TZ)
+
     settings = get_settings()
     event_end = slot + timedelta(minutes=30)
 
