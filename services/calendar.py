@@ -174,7 +174,7 @@ async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
             while slot.hour < BUSINESS_HOURS_END:
                 slot_end = slot + timedelta(minutes=SLOT_DURATION_MINUTES)
                 # Check if slot is in the future (at least 2 hours from now)
-                if slot > now + timedelta(hours=2):
+                if slot >= now + timedelta(hours=2):
                     if not _overlaps_busy(slot, slot_end, busy_intervals):
                         available.append(slot)
                 slot = slot_end
@@ -208,6 +208,10 @@ async def verify_slot_available(slot: datetime) -> bool | None:
     if not service:
         logger.error("Cannot verify slot — Calendar not configured (blocking booking)")
         return None
+
+    if slot.tzinfo is None:
+        logger.warning(f"verify_slot_available: naive datetime {slot.isoformat()}, assuming America/Bogota")
+        slot = slot.replace(tzinfo=COLOMBIA_TZ)
 
     settings = get_settings()
     slot_start = slot.astimezone(COLOMBIA_TZ)
