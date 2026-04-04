@@ -352,6 +352,10 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
                     "pero no hubo respuesta. Retoma la conversación normalmente. "
                     "Si quiere agendar, ayúdalo con los horarios disponibles."
                 )
+            else:
+                # Escalation is active — bot stays silent while Yésica handles
+                logger.info(f"[{conv.phone}] Escalated to Yésica ({hours_since:.1f}h ago) — bot silent")
+                return
         except Exception as e:
             logger.error(f"[{conv.phone}] Failed to parse escalated_at '{conv.escalated_at}': {e}")
 
