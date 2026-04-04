@@ -472,6 +472,35 @@ class TestReminderConfirmation:
         assert conv.reminder_confirmation_pending is False
 
     @pytest.mark.asyncio
+    async def test_negative_with_confirm_keyword_treated_as_rejection(self):
+        """'ya no voy' contains confirm keyword 'ya' but should be REJECTED, not confirmed.
+        Regression test: rejection must be checked before confirmation because short
+        confirm keywords (ya, va, claro) can appear in negative phrases."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_regression",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+        )
+
+        with (
+            patch("bot.flow.calendar.delete_event", new_callable=AsyncMock, return_value=True),
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Entendido, la cancelo"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+            patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
+        ):
+            handled = await flow._handle_reminder_response(conv, "ya no voy")
+
+        assert handled is True
+        # Must be treated as rejection (cancelled), NOT confirmation
+        assert conv.reminder_confirmed is False
+        assert conv.appointment_cancelled is True
+        assert conv.calendar_event_id is None
+
+    @pytest.mark.asyncio
     async def test_reminder_rejection_cancels(self):
         """Rejecting after reminder should cancel the appointment."""
         from bot import flow

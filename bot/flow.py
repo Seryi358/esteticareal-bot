@@ -583,6 +583,32 @@ async def _handle_reminder_response(conv: ConversationState, text: str) -> bool:
     """Handle patient's response to a day-before confirmation reminder.
     Returns True if the response was handled, False to fall through to normal flow."""
 
+    # IMPORTANT: Check rejection FIRST — short confirmation keywords like "ya", "va",
+    # "claro" can false-positive on negative phrases ("ya no voy", "claro que no").
+    # Rejection keywords are more specific ("no puedo", "no voy") so they should
+    # take precedence.
+    if _is_reminder_rejection(text):
+        logger.info(f"[{conv.phone}] Patient rejected appointment after reminder")
+        conv.reminder_confirmation_pending = False
+
+        # Check if they mention a specific new time → reschedule directly
+        time_hints = [
+            "después de las", "despues de las", "a las ", "en la tarde",
+            "en la mañana", "por la mañana", "por la tarde", "mañana",
+            "otro día", "otro dia", "otro horario", "otra hora",
+            "reagendar", "reprogramar", "cambiar",
+        ]
+        text_lower = text.lower()
+        has_time_hint = any(kw in text_lower for kw in time_hints)
+
+        if has_time_hint:
+            await _handle_reschedule(conv, text)
+            return True
+
+        # Pure rejection — cancel and ask if they want to reschedule
+        await _handle_cancel(conv, ask_reschedule=True)
+        return True
+
     if _is_reminder_confirmation(text):
         conv.reminder_confirmed = True
         conv.reminder_confirmation_pending = False
@@ -616,28 +642,6 @@ async def _handle_reminder_response(conv: ConversationState, text: str) -> bool:
             )
         except Exception as e:
             logger.error(f"Failed to notify Yésica of confirmation: {e}")
-        return True
-
-    if _is_reminder_rejection(text):
-        logger.info(f"[{conv.phone}] Patient rejected appointment after reminder")
-        conv.reminder_confirmation_pending = False
-
-        # Check if they mention a specific new time → reschedule directly
-        time_hints = [
-            "después de las", "despues de las", "a las ", "en la tarde",
-            "en la mañana", "por la mañana", "por la tarde", "mañana",
-            "otro día", "otro dia", "otro horario", "otra hora",
-            "reagendar", "reprogramar", "cambiar",
-        ]
-        text_lower = text.lower()
-        has_time_hint = any(kw in text_lower for kw in time_hints)
-
-        if has_time_hint:
-            await _handle_reschedule(conv, text)
-            return True
-
-        # Pure rejection — cancel and ask if they want to reschedule
-        await _handle_cancel(conv, ask_reschedule=True)
         return True
 
     # Ambiguous response — let normal flow handle it
