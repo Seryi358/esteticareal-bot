@@ -1311,6 +1311,7 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         if not meet_link:
             logger.warning(f"[{conv.phone}] Google Calendar returned no hangoutLink — falling back to WhatsApp videocall")
             conv.meeting_type = "whatsapp"
+            meeting_type = "whatsapp"
 
     name = conv.user_display_name or conv.collected_name or ""
     greeting = f"{name}, te" if name else "Te"
