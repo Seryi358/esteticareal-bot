@@ -681,3 +681,84 @@ class TestReminderFields:
         assert conv.reminder_confirmation_pending is False
         assert conv.reminder_confirmed is False
         assert conv.appointment_cancelled is False
+
+
+# ---------------------------------------------------------------------------
+# Past appointment auto-reset
+# ---------------------------------------------------------------------------
+
+
+class TestPastAppointmentReset:
+    @pytest.mark.asyncio
+    async def test_past_appointment_resets_to_chatting(self):
+        """Patient with a past appointment should be freed to start a new flow."""
+        from bot import flow
+
+        # Appointment 2 hours ago (past the 1-hour threshold)
+        past_time = datetime.now(COLOMBIA_TZ) - timedelta(hours=2)
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=past_time.isoformat(),
+            calendar_event_id="evt_past_123",
+            reminder_sent=True,
+            reminder_day_before_sent=True,
+            reminder_confirmed=True,
+        )
+
+        with (
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Hola, en qué te puedo ayudar?"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+        ):
+            await flow._handle_text(conv, "Hola, quiero agendar otra cita")
+
+        assert conv.phase == "chatting"
+        assert conv.appointment_datetime is None
+        assert conv.calendar_event_id is None
+        assert conv.reminder_sent is False
+        assert conv.reminder_confirmed is False
+
+    @pytest.mark.asyncio
+    async def test_recent_appointment_not_reset(self):
+        """Appointment less than 1 hour ago should NOT be reset."""
+        from bot import flow
+
+        # Appointment 30 minutes ago (within 1-hour threshold)
+        recent_time = datetime.now(COLOMBIA_TZ) - timedelta(minutes=30)
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=recent_time.isoformat(),
+            calendar_event_id="evt_recent_123",
+            reminder_confirmed=True,
+        )
+
+        with (
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Hola!"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+        ):
+            await flow._handle_text(conv, "Gracias por la cita")
+
+        # Should still be in appointment_confirmed (not reset yet)
+        assert conv.phase == "appointment_confirmed"
+        assert conv.calendar_event_id == "evt_recent_123"
+
+    @pytest.mark.asyncio
+    async def test_future_appointment_not_reset(self):
+        """Future appointment should obviously NOT be reset."""
+        from bot import flow
+
+        future_time = _future_slot()
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=future_time.isoformat(),
+            calendar_event_id="evt_future_123",
+            reminder_confirmation_pending=True,
+        )
+
+        with (
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Tu cita es pronto!"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+        ):
+            await flow._handle_text(conv, "Hola")
+
+        assert conv.phase == "appointment_confirmed"
+        assert conv.calendar_event_id == "evt_future_123"

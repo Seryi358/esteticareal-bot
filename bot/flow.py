@@ -305,6 +305,32 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     conv.add_message("user", text)
     conv.last_user_message_at = datetime.now(COLOMBIA_TZ).isoformat()
 
+    # Auto-reset past appointments — if the appointment already happened,
+    # free the patient so they can start a new booking flow naturally.
+    if conv.phase == "appointment_confirmed" and conv.appointment_datetime:
+        try:
+            _appt = datetime.fromisoformat(conv.appointment_datetime).replace(tzinfo=COLOMBIA_TZ)
+            if _appt < datetime.now(COLOMBIA_TZ) - timedelta(hours=1):
+                logger.info(f"[{conv.phone}] Appointment {conv.appointment_datetime} has passed — resetting state")
+                conv.phase = "chatting"
+                conv.appointment_datetime = None
+                conv.calendar_event_id = None
+                conv.calendar_slots_json = None
+                conv.slots_fetched_at = None
+                conv.meeting_type = None
+                conv.meet_link = None
+                conv.reminder_sent = False
+                conv.reminder_day_before_sent = False
+                conv.reminder_confirmation_pending = False
+                conv.reminder_confirmed = False
+                conv.follow_up_sent = False
+                conv.inject_system_event(
+                    "APPOINTMENT_COMPLETED: La cita anterior ya pasó. "
+                    "Atiende al usuario normalmente. Si quiere agendar una nueva cita, ayúdalo."
+                )
+        except Exception as e:
+            logger.error(f"[{conv.phone}] Failed to parse appointment_datetime for reset: {e}")
+
     # Phase-specific handling
     if conv.phase == "awaiting_slot_selection":
         await _try_parse_slot_selection(conv, text)
