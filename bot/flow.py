@@ -1410,7 +1410,8 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
 
     parts = [p.strip() for p in reply.split("[MSG]") if p.strip()]
     if not parts:
-        return
+        logger.warning(f"Empty reply after splitting for {conv.phone} (phase={conv.phase}), sending fallback")
+        parts = ["¿En qué te puedo ayudar?"]
 
     full_reply = " ".join(parts)
     conv.add_message("assistant", full_reply)
