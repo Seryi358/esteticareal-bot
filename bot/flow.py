@@ -561,6 +561,9 @@ _REJECT_KEYWORDS = [
     "no podré", "no podre", "me es imposible",
     "tengo algo", "se me cruzó", "se me cruzo",
     "no puedo asistir", "no me es posible",
+    # Short confirm keywords ("claro", "ya", "va", "ok") false-positive on these
+    # negative phrases via word-boundary regex — must be caught here first.
+    "claro que no", "ya no", "no va", "ok no",
 ]
 
 

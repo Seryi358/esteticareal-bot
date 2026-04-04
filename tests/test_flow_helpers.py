@@ -126,6 +126,18 @@ class TestIsReminderRejection:
     def test_me_es_imposible(self):
         assert _is_reminder_rejection("Me es imposible") is True
 
+    def test_claro_que_no(self):
+        assert _is_reminder_rejection("Claro que no") is True
+
+    def test_ya_no(self):
+        assert _is_reminder_rejection("Ya no") is True
+
+    def test_no_va(self):
+        assert _is_reminder_rejection("No va a ser posible") is True
+
+    def test_ok_no(self):
+        assert _is_reminder_rejection("Ok no, no puedo") is True
+
 
 # ---------------------------------------------------------------------------
 # _wants_to_cancel_only

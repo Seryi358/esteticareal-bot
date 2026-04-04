@@ -402,14 +402,22 @@ class TestHandleTextPhaseRouting:
 # ---------------------------------------------------------------------------
 
 class TestReminderEdgeCases:
-    def test_claro_que_no_is_not_confirmation(self):
-        """'claro que no' — 'claro' is confirm keyword but 'no puedo' isn't here.
-        Since rejection is checked first and 'claro que no' doesn't contain
-        any rejection keywords, it falls to confirmation where 'claro' matches.
-        This is actually correct — 'claro que no' without 'puedo' is rare."""
-        # Just document the behavior — 'claro' alone matches confirmation
+    def test_claro_que_no_is_rejection(self):
+        """'claro que no' means 'of course not' — must be caught as rejection,
+        not confirmation (even though 'claro' is a confirmation keyword)."""
+        assert _is_reminder_rejection("claro que no") is True
+        # Confirmation still matches 'claro' but rejection is checked first in flow
         assert _is_reminder_confirmation("claro que no") is True
-        # But with a rejection keyword, rejection should win (tested in heartbeat 39)
+
+    def test_ya_no_is_rejection(self):
+        """'ya no' means 'not anymore' — must be caught as rejection,
+        not confirmation (even though 'ya' is a confirmation keyword)."""
+        assert _is_reminder_rejection("ya no") is True
+
+    def test_no_va_is_rejection(self):
+        """'no va' means 'it's not happening' — must be caught as rejection,
+        not confirmation (even though 'va' is a confirmation keyword)."""
+        assert _is_reminder_rejection("no va") is True
 
     def test_si_pero_no_puedo(self):
         """'sí pero no puedo' — rejection wins because 'no puedo' is checked first."""
