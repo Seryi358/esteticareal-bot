@@ -95,9 +95,9 @@ async def _reminder_scheduler():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    os.makedirs(get_settings().conversations_dir, exist_ok=True)
-    os.makedirs("data/learning", exist_ok=True)
-    os.makedirs("credentials", exist_ok=True)
+    settings = get_settings()
+    os.makedirs(settings.conversations_dir, exist_ok=True)
+    os.makedirs(settings.credentials_dir, exist_ok=True)
     logger.info("Estetica Real Bot (Valen v4) arrancado correctamente")
     # Start background schedulers
     followup_task = asyncio.create_task(_followup_scheduler())
