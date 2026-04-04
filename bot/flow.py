@@ -22,11 +22,17 @@ _push_name_cache: dict[str, str | None] = {}
 # ---------------------------------------------------------------------------
 _phone_locks: dict[str, asyncio.Lock] = {}
 _phone_locks_meta: asyncio.Lock = asyncio.Lock()
+_PHONE_LOCKS_MAX = 500  # Evict idle locks when dict exceeds this size
 
 
 async def _get_phone_lock(phone: str) -> asyncio.Lock:
     async with _phone_locks_meta:
         if phone not in _phone_locks:
+            # Evict unlocked entries when we exceed the threshold
+            if len(_phone_locks) >= _PHONE_LOCKS_MAX:
+                to_remove = [k for k, v in _phone_locks.items() if not v.locked()]
+                for k in to_remove[:len(to_remove) // 2]:  # Remove half of idle locks
+                    del _phone_locks[k]
             _phone_locks[phone] = asyncio.Lock()
         return _phone_locks[phone]
 
