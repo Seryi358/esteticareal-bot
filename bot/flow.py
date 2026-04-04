@@ -71,6 +71,10 @@ async def process_message(
     # Clear expired takeover flag if it was left on
     if conv.human_takeover and not conv.human_takeover_until:
         conv.human_takeover = False
+        # Also reset escalated_to_yesica phase since Yésica already handled it
+        if conv.phase == "escalated_to_yesica":
+            conv.phase = "chatting"
+            conv.escalated_at = None
         conv.inject_system_event(
             "YESICA_HANDBACK: Yésica acaba de terminar de hablar con este cliente. "
             "Lee los mensajes anteriores de Yésica (aparecen como 'assistant') para "
@@ -325,6 +329,23 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         if _wants_to_reschedule(text):
             await _handle_reschedule(conv, text)
             return
+
+    # Auto-reset stale escalated_to_yesica phase after 4 hours
+    if conv.phase == "escalated_to_yesica" and conv.escalated_at:
+        try:
+            esc_time = datetime.fromisoformat(conv.escalated_at).replace(tzinfo=COLOMBIA_TZ)
+            hours_since = (datetime.now(COLOMBIA_TZ) - esc_time).total_seconds() / 3600
+            if hours_since >= 4:
+                logger.info(f"[{conv.phone}] Auto-resetting escalated_to_yesica after {hours_since:.1f}h")
+                conv.phase = "chatting"
+                conv.escalated_at = None
+                conv.inject_system_event(
+                    "FASE_RESET: El paciente fue escalado a Yésica hace más de 4 horas "
+                    "pero no hubo respuesta. Retoma la conversación normalmente. "
+                    "Si quiere agendar, ayúdalo con los horarios disponibles."
+                )
+        except Exception:
+            pass
 
     # Let GPT generate its reply — it decides what to do via tags
     reply = await _generate_reply(conv)
@@ -752,6 +773,7 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
     settings = get_settings()
 
     conv.phase = "escalated_to_yesica"
+    conv.escalated_at = datetime.now(COLOMBIA_TZ).isoformat()
 
     # Notify Yésica with context
     name = conv.collected_name or conv.user_display_name or "Cliente"
