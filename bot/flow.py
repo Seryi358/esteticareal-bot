@@ -352,8 +352,8 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
                     "pero no hubo respuesta. Retoma la conversación normalmente. "
                     "Si quiere agendar, ayúdalo con los horarios disponibles."
                 )
-        except Exception:
-            pass
+        except Exception as e:
+            logger.error(f"[{conv.phone}] Failed to parse escalated_at '{conv.escalated_at}': {e}")
 
     # Let GPT generate its reply — it decides what to do via tags
     reply = await _generate_reply(conv)
@@ -441,6 +441,7 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     conv.reminder_confirmed = False
     conv.appointment_cancelled = False
     conv.follow_up_sent = False  # Allow new follow-up after reschedule
+    conv.escalated_at = None  # Clear stale escalation timestamp
 
     if needs_evening:
         conv.inject_system_event(
@@ -642,6 +643,7 @@ async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -
     conv.reminder_confirmed = False
     conv.appointment_cancelled = True
     conv.follow_up_sent = False  # Allow new follow-up after cancellation
+    conv.escalated_at = None  # Clear stale escalation timestamp
     conv.phase = "chatting"
 
     if ask_reschedule:
