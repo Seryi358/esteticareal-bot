@@ -1074,7 +1074,27 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
         )
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
-        await _escalate_to_yesica_evening(conv, text)
+
+        # Escalate with correct context (NOT evening/weekend — just ambiguous responses)
+        settings = get_settings()
+        conv.phase = "escalated_to_yesica"
+        conv.escalated_at = datetime.now(COLOMBIA_TZ).isoformat()
+        name = conv.collected_name or conv.user_display_name or "Cliente"
+        service = conv.service_interest or "Levantamiento de glúteos"
+        message = (
+            f"\U0001f4cb *Escalación — confirmación ambigua*\n\n"
+            f"*Cliente:* {name}\n"
+            f"*WhatsApp:* +{conv.phone}\n"
+            f"*Servicio:* {service}\n"
+            f"*Último mensaje:* {text[:200]}\n\n"
+            f"El bot no pudo confirmar si el cliente acepta o rechaza el horario "
+            f"después de varios intentos. Por favor coordina directamente."
+        )
+        try:
+            await evolution.send_text_message(settings.yesica_phone, message)
+            logger.info(f"Escalated {conv.phone} to Yésica for ambiguous confirmation")
+        except Exception as e:
+            logger.error(f"Failed to notify Yésica for confirmation escalation: {e}")
         return
 
     if attempts >= 3:
