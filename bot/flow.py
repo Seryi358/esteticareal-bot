@@ -1032,6 +1032,8 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
         logger.info(f"[{conv.phone}] AI: user rejected proposed slot")
         _confirmation_attempts.pop(conv.phone, None)
         conv.appointment_datetime = None
+        conv.calendar_slots_json = None  # Force refetch — slots may be stale
+        conv.slots_fetched_at = None
         conv.phase = "awaiting_slot_selection"
         conv.inject_system_event(
             "SLOT_REJECTED: El usuario NO quiere ese horario. "
