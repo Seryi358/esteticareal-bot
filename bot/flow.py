@@ -1402,7 +1402,17 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         )
         await evolution.send_text_message(conv.phone, confirmation_msg)
         await asyncio.sleep(1.5)
-        await evolution.send_text_message(conv.phone, meet_link)
+        link_sent = await evolution.send_text_message(conv.phone, meet_link)
+        if not link_sent:
+            await asyncio.sleep(3)
+            link_sent = await evolution.send_text_message(conv.phone, meet_link)
+            if not link_sent:
+                logger.error(f"[{conv.phone}] CRITICAL: Meet link failed to send after retry — notifying Yesica")
+                await evolution.send_text_message(
+                    settings.yesica_phone,
+                    f"⚠️ No se pudo enviar el enlace de Meet al cliente +{conv.phone}. "
+                    f"Enlace: {meet_link} — por favor envíalo manualmente."
+                )
         await asyncio.sleep(1.5)
         await evolution.send_text_message(conv.phone, follow_msg)
         conv.add_message("assistant", f"{confirmation_msg} [MSG] {meet_link} [MSG] {follow_msg}")
