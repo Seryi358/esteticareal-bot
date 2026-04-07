@@ -104,7 +104,7 @@ def main():
         fail(f"No token.json at {token_path} and no GOOGLE_TOKEN_JSON env var")
         errors.append("No credentials found at all")
 
-    cal_id = os.environ.get("GOOGLE_CALENDAR_ID", "yesica9206@gmail.com")
+    cal_id = os.environ.get("GOOGLE_CALENDAR_ID", "estetica.real.ai@gmail.com")
     ok(f"GOOGLE_CALENDAR_ID = {cal_id}")
 
     # ── Step 2: Credentials ──
