@@ -107,6 +107,56 @@ def _get_service():
     return build("calendar", "v3", credentials=creds, cache_discovery=False)
 
 
+async def verify_calendar_connection() -> dict:
+    """Startup check: verify calendar credentials and access.
+
+    Returns a dict with status, calendar_id, and any errors.
+    Should be called during app startup to catch misconfigurations early.
+    """
+    settings = get_settings()
+    cal_id = settings.google_calendar_id
+    result = {"calendar_id": cal_id, "status": "unknown", "error": None}
+
+    logger.info(f"🔗 Calendar connection check — calendar_id={cal_id}")
+
+    service = _get_service()
+    if not service:
+        result["status"] = "error"
+        result["error"] = "Failed to build Calendar service (credentials missing or invalid)"
+        logger.error(f"❌ Calendar check FAILED: {result['error']}")
+        return result
+
+    try:
+        loop = asyncio.get_running_loop()
+        # Try to read events — this validates both credentials AND calendar access
+        now = datetime.now(COLOMBIA_TZ)
+
+        def _test_read():
+            return service.events().list(
+                calendarId=cal_id,
+                timeMin=now.isoformat(),
+                timeMax=(now + timedelta(days=1)).isoformat(),
+                maxResults=1,
+                singleEvents=True,
+            ).execute()
+
+        events_result = await asyncio.wait_for(
+            loop.run_in_executor(None, _test_read), timeout=10
+        )
+        event_count = len(events_result.get("items", []))
+        result["status"] = "connected"
+        logger.info(
+            f"✅ Calendar connected — calendar_id={cal_id}, "
+            f"events_today={event_count}"
+        )
+    except Exception as e:
+        result["status"] = "error"
+        result["error"] = str(e)
+        logger.error(f"❌ Calendar check FAILED for {cal_id}: {e}")
+
+    return result
+
+
 async def get_available_slots(days_ahead: int = 7) -> list[datetime]:
     """
     Returns a list of available 30-min appointment slots for the next `days_ahead` days.
@@ -551,10 +601,12 @@ async def book_slot_atomic(
     async with lock:
         is_available = await verify_slot_available(slot)
         if is_available is None:
-            # Calendar service unavailable — cannot verify or create
+            # Calendar service unavailable — BLOCK booking (fail-closed).
+            # We cannot verify availability, so we must not create an event
+            # that could double-book. The caller will escalate to Yésica.
             logger.error(
                 f"book_slot_atomic: Calendar unavailable for {slot.isoformat()} "
-                f"({user_phone}) — cannot proceed"
+                f"({user_phone}) — BLOCKING booking (fail-closed)"
             )
             return False, None  # Cannot verify — treat as unavailable to prevent unverified booking
         if not is_available:
@@ -621,9 +673,20 @@ async def _check_for_duplicate_events(
         ]
         if timed:
             logger.error(
-                f"Found {len(timed)} OTHER events in slot "
+                f"DUPLICATE DETECTED: {len(timed)} OTHER events in slot "
                 f"{slot_start.isoformat()}: {[e.get('summary') for e in timed]}"
             )
+            # Delete duplicate events to prevent double-booking from persisting
+            for dup in timed:
+                dup_id = dup.get("id")
+                if dup_id:
+                    try:
+                        await delete_event(dup_id)
+                        logger.warning(
+                            f"Deleted duplicate event {dup_id}: '{dup.get('summary')}'"
+                        )
+                    except Exception as del_err:
+                        logger.error(f"Failed to delete duplicate {dup_id}: {del_err}")
             return True
     except Exception as e:
         logger.error(f"Error checking for duplicates: {e}")

@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     bot_phone: str = ""
 
     # Google Calendar
-    google_calendar_id: str = "yesica9206@gmail.com"
+    google_calendar_id: str = "estetica.real.ai@gmail.com"
     google_token_json: str = ""  # base64-encoded token.json for production
 
     # Google Sheets

@@ -1312,30 +1312,32 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         return
     formatted_dt = _format_appointment_datetime(slot)
 
-    # ── If event is None, retry once under slot lock to prevent double-booking ──
+    # ── If event is None, retry once ATOMICALLY (lock + verify + create) ──
     if not event:
-        logger.error(f"[{conv.phone}] Calendar API returned None — retrying under lock")
-        slot_lock = await calendar._get_slot_lock(slot)
-        async with slot_lock:
-            # Re-verify availability: another client may have booked during the
-            # window between book_slot_atomic releasing its lock and this retry.
-            still_available = await calendar.verify_slot_available(slot)
-            if still_available is None or not still_available:
-                logger.warning(
-                    f"[{conv.phone}] Slot {slot.isoformat()} no longer available on retry "
-                    f"(verify={still_available}) — aborting retry"
-                )
-                event = None  # force escalation path below
-            else:
-                event = await calendar.create_appointment(
-                    slot,
-                    conv.collected_name or conv.user_display_name or "Cliente",
-                    conv.collected_phone or conv.phone,
-                    conv.collected_email or "",
-                    meeting_type=meeting_type,
-                )
+        logger.warning(f"[{conv.phone}] Calendar API failed — retrying through atomic path")
+        is_available_retry, event = await calendar.book_slot_atomic(
+            slot,
+            conv.collected_name or conv.user_display_name or "Cliente",
+            conv.collected_phone or conv.phone,
+            conv.collected_email or "",
+            meeting_type=meeting_type,
+        )
+        if not is_available_retry:
+            # Slot was taken during retry — offer alternatives
+            logger.warning(f"[{conv.phone}] Slot {slot.isoformat()} taken on retry — re-fetching")
+            conv.appointment_datetime = None
+            conv.calendar_slots_json = None
+            conv.slots_fetched_at = None
+            conv.inject_system_event(
+                "SLOT_CONFLICT: El horario que el usuario eligió YA NO está disponible — "
+                "alguien más lo ocupó. Discúlpate brevemente y ofrece otro horario cercano."
+            )
+            await _fetch_and_inject_slots(conv)
+            reply = await _generate_reply(conv)
+            await _send_and_record(conv, reply)
+            return
         if event:
-            logger.info(f"[{conv.phone}] Calendar event created on retry: {event.get('id')}")
+            logger.info(f"[{conv.phone}] Calendar event created on atomic retry: {event.get('id')}")
 
     # ── Calendar truly failed — escalate, do NOT send phantom confirmation ──
     if not event:

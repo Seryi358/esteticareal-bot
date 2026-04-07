@@ -99,6 +99,16 @@ async def lifespan(app: FastAPI):
     os.makedirs(settings.conversations_dir, exist_ok=True)
     os.makedirs(settings.credentials_dir, exist_ok=True)
     logger.info("Estetica Real Bot (Valen v4) arrancado correctamente")
+
+    # Verify Google Calendar connection at startup
+    from services.calendar import verify_calendar_connection
+    cal_check = await verify_calendar_connection()
+    if cal_check["status"] != "connected":
+        logger.error(
+            f"⚠️ CALENDAR NOT CONNECTED — bookings will fail! "
+            f"calendar_id={cal_check['calendar_id']}, error={cal_check.get('error')}"
+        )
+
     # Start background schedulers
     followup_task = asyncio.create_task(_followup_scheduler())
     reminder_task = asyncio.create_task(_reminder_scheduler())
