@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI, Request, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from bot.conversation import load_conversation, save_conversation
 from bot.flow import process_message, send_followup_if_needed, send_reminder_if_needed, send_auto_cancel_if_needed, _get_phone_lock
@@ -119,6 +120,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Estetica Real WhatsApp Bot", lifespan=lifespan)
+
+# Serve static files (promotional images, etc.)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
 @app.get("/health")

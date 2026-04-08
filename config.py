@@ -25,8 +25,11 @@ class Settings(BaseSettings):
     # Google Sheets
     google_sheet_id: str = ""
 
+    # Base URL of this service (for constructing static file URLs)
+    base_url: str = ""  # e.g. https://esteticareal-bot.easypanel.host
+
     # Media assets — public URLs for before/after photos and videos
-    # Leave empty until Yésica provides the actual files
+    media_ficha_gluteos_url: str = ""   # Promo flyer — Plan Glúteos $350k (auto-built from base_url if empty)
     media_gluteos_url: str = ""         # Before/after photo — glúteos
     media_reduccion_url: str = ""       # Before/after photo — reducción de medidas
     media_facial_url: str = ""          # Before/after photo — limpieza facial

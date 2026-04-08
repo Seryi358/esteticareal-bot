@@ -305,6 +305,7 @@ async def _handle_image(
 # Tags that GPT includes in its response to trigger actions
 _TAG_CHECK_CALENDAR = "[REVISAR_AGENDA]"
 _TAG_EVENING = "[HORARIO_ESPECIAL]"
+_TAG_FICHA_GLUTEOS = "[ENVIAR_FICHA_GLUTEOS]"
 
 
 async def _handle_text(conv: ConversationState, text: str) -> None:
@@ -331,6 +332,7 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
                 conv.slots_fetched_at = None
                 conv.meeting_type = None
                 conv.meet_link = None
+                conv.booking_type = "valoracion"
                 conv.reminder_sent = False
                 conv.reminder_day_before_sent = False
                 conv.reminder_confirmation_pending = False
@@ -422,7 +424,16 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
     # Strip tags from the reply and detect actions
     has_calendar_tag = _TAG_CHECK_CALENDAR in reply
     has_evening_tag = _TAG_EVENING in reply
-    reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").strip()
+    has_ficha_gluteos_tag = _TAG_FICHA_GLUTEOS in reply
+    reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").replace(_TAG_FICHA_GLUTEOS, "").strip()
+
+    # ACTION: Send gluteos promotional flyer
+    if has_ficha_gluteos_tag:
+        conv.booking_type = "tratamiento"
+        conv.service_interest = "Plan Glúteos — Tonificación y Reafirmación"
+        await _send_and_record(conv, reply)
+        await _send_ficha_gluteos(conv)
+        return
 
     # ACTION: Evening/weekend escalation
     if has_evening_tag and conv.phase not in ("appointment_confirmed", "escalated_to_yesica"):
@@ -496,6 +507,7 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
+    conv.booking_type = "valoracion"
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
     conv.reminder_confirmation_pending = False
@@ -705,6 +717,7 @@ async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -
     conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
+    conv.booking_type = "valoracion"
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
     conv.reminder_confirmation_pending = False
@@ -822,6 +835,7 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
     conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
+    conv.booking_type = "valoracion"
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
     conv.reminder_confirmation_pending = False
@@ -851,6 +865,35 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
 
     logger.info(f"[{phone}] Auto-cancelled appointment for {formatted_dt}")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Send gluteos promotional flyer
+# ---------------------------------------------------------------------------
+
+async def _send_ficha_gluteos(conv: ConversationState) -> None:
+    """Send the Plan Glúteos promotional image to the user."""
+    settings = get_settings()
+
+    # Build the image URL: prefer explicit env var, fallback to base_url + static path
+    ficha_url = settings.media_ficha_gluteos_url
+    if not ficha_url and settings.base_url:
+        ficha_url = f"{settings.base_url.rstrip('/')}/static/ficha-gluteos.jpg"
+
+    if not ficha_url:
+        logger.warning(f"[{conv.phone}] No ficha URL configured (set MEDIA_FICHA_GLUTEOS_URL or BASE_URL)")
+        return
+
+    sent = await evolution.send_media_message(
+        conv.phone,
+        media_url=ficha_url,
+        media_type="image",
+        caption="Plan Glúteos — Tonificación y Reafirmación 💪",
+    )
+    if sent:
+        logger.info(f"[{conv.phone}] Sent ficha gluteos image")
+    else:
+        logger.error(f"[{conv.phone}] Failed to send ficha gluteos image (url={ficha_url})")
 
 
 # ---------------------------------------------------------------------------
@@ -1047,14 +1090,24 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
     if decision == "yes":
         logger.info(f"[{conv.phone}] AI: user confirmed slot")
         _confirmation_attempts.pop(conv.phone, None)
-        conv.phase = "awaiting_meeting_type"
-        conv.inject_system_event(
-            "SLOT_CONFIRMED: El usuario confirmó el horario. "
-            "Ahora pregúntale cómo prefiere la videollamada: "
-            "por *WhatsApp* o por *Google Meet*. "
-            "Dile algo como: 'Perfecto, ¿prefieres que la valoración sea "
-            "por videollamada de WhatsApp o por Google Meet?'"
-        )
+        if conv.booking_type == "tratamiento":
+            # Tratamiento is presencial — skip meeting type, default to whatsapp for calendar
+            conv.meeting_type = "whatsapp"
+            conv.phase = "collecting_data"
+            conv.inject_system_event(
+                "SLOT_CONFIRMED: El usuario confirmó el horario para su tratamiento de glúteos. "
+                "Es una cita PRESENCIAL en el consultorio. Solo falta el nombre completo "
+                "para confirmar la cita. Pídelo de forma natural."
+            )
+        else:
+            conv.phase = "awaiting_meeting_type"
+            conv.inject_system_event(
+                "SLOT_CONFIRMED: El usuario confirmó el horario. "
+                "Ahora pregúntale cómo prefiere la videollamada: "
+                "por *WhatsApp* o por *Google Meet*. "
+                "Dile algo como: 'Perfecto, ¿prefieres que la valoración sea "
+                "por videollamada de WhatsApp o por Google Meet?'"
+            )
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
@@ -1392,9 +1445,13 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
     name = conv.user_display_name or conv.collected_name or ""
     greeting = f"{name}, te" if name else "Te"
 
+    # Dynamic label based on booking type
+    is_tratamiento = conv.booking_type == "tratamiento"
+    cita_label = "tu tratamiento de glúteos" if is_tratamiento else "tu valoración virtual"
+
     if meeting_type == "meet" and meet_link:
         confirmation_msg = (
-            f"{greeting} confirmo que tu valoración virtual quedó agendada para el "
+            f"{greeting} confirmo que {cita_label} quedó agendada para el "
             f"{formatted_dt}.\n\n"
             f"💻 La reunión será por Google Meet, te comparto tu enlace único"
         )
@@ -1419,19 +1476,29 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         await evolution.send_text_message(conv.phone, follow_msg)
         conv.add_message("assistant", f"{confirmation_msg} [MSG] {meet_link} [MSG] {follow_msg}")
     else:
-        confirmation_msg = (
-            f"{greeting} confirmo que tu valoración virtual quedó agendada para el "
-            f"{formatted_dt}.\n\n"
-            f"📲 Yésica te llamará por videollamada de WhatsApp a este mismo número "
-            f"el día y hora de tu cita.\n\n"
-            f"Asegúrate de tener buena conexión a internet. Si necesitas cambiarla o cancelarla, "
-            f"puedes escribirme directamente por este WhatsApp."
-        )
+        if is_tratamiento:
+            confirmation_msg = (
+                f"{greeting} confirmo que {cita_label} quedó agendado para el "
+                f"{formatted_dt}.\n\n"
+                f"📲 Yésica te atenderá presencialmente en el consultorio en Bello, "
+                f"cerca de la Estación Madera del Metro.\n\n"
+                f"Si necesitas cambiar o cancelar, puedes escribirme por este WhatsApp."
+            )
+        else:
+            confirmation_msg = (
+                f"{greeting} confirmo que {cita_label} quedó agendada para el "
+                f"{formatted_dt}.\n\n"
+                f"📲 Yésica te llamará por videollamada de WhatsApp a este mismo número "
+                f"el día y hora de tu cita.\n\n"
+                f"Asegúrate de tener buena conexión a internet. Si necesitas cambiarla o cancelarla, "
+                f"puedes escribirme directamente por este WhatsApp."
+            )
         await evolution.send_text_message(conv.phone, confirmation_msg)
         conv.add_message("assistant", confirmation_msg)
 
+    booking_label = "Tratamiento de glúteos" if is_tratamiento else "Valoración virtual"
     conv.inject_system_event(
-        f"APPOINTMENT_CONFIRMED: Cita creada y confirmada al usuario para {formatted_dt}. "
+        f"APPOINTMENT_CONFIRMED: {booking_label} creada y confirmada al usuario para {formatted_dt}. "
         f"Tipo: {'Google Meet' if meeting_type == 'meet' else 'videollamada WhatsApp'}. "
         f"Ya le enviaste la confirmación. "
         f"Si el usuario responde, sé natural y breve. No repitas la información."
@@ -1490,7 +1557,7 @@ async def _send_and_record(conv: ConversationState, reply: str) -> None:
     import random
 
     # Strip action tags that should never reach the user
-    reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").strip()
+    reply = reply.replace(_TAG_CHECK_CALENDAR, "").replace(_TAG_EVENING, "").replace(_TAG_FICHA_GLUTEOS, "").strip()
 
     # Safety net: ensure response never dies before appointment is confirmed
     reply = _ensure_conversation_alive(reply, conv.phase)
@@ -1828,13 +1895,25 @@ async def _notify_yesica_appointment(
         tipo_label = "Videollamada de WhatsApp"
         instruccion = "Recuerda llamar al cliente por videollamada de WhatsApp el día de la cita 📲"
 
+    is_tratamiento = conv.booking_type == "tratamiento"
+
+    if is_tratamiento:
+        header = "✅ *Nuevo tratamiento de glúteos agendado*"
+        servicio_line = f"*Servicio:* {conv.service_interest or 'Plan Glúteos $350.000'}"
+        tipo_line = f"*Tipo:* Tratamiento presencial"
+        instruccion = "La paciente viene al consultorio para su primera sesión del Plan Glúteos 💪"
+    else:
+        header = "✅ *Nueva valoración virtual agendada*"
+        servicio_line = f"*Servicio:* {conv.service_interest or 'Levantamiento de glúteos'}"
+        tipo_line = f"*Valoración:* Gratuita — {tipo_label}"
+
     message = (
-        f"✅ *Nueva valoración virtual agendada*\n\n"
+        f"{header}\n\n"
         f"*Paciente:* {name}\n"
         f"*Teléfono:* +{conv.collected_phone or conv.phone}\n"
         f"*WhatsApp:* +{conv.phone}\n"
-        f"*Servicio:* {conv.service_interest or 'Levantamiento de glúteos'}\n"
-        f"*Valoración:* Gratuita — {tipo_label}\n"
+        f"{servicio_line}\n"
+        f"{tipo_line}\n"
         f"*Fecha:* {appointment_dt}\n\n"
         f"{instruccion}\n"
         f"Quedó registrado en tu Google Calendar 📅"
