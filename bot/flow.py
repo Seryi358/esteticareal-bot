@@ -1,6 +1,8 @@
 import asyncio
+import base64
 import json
 import logging
+import os
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -871,29 +873,83 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
 # Send gluteos promotional flyer
 # ---------------------------------------------------------------------------
 
-async def _send_ficha_gluteos(conv: ConversationState) -> None:
-    """Send the Plan Glúteos promotional image to the user."""
-    settings = get_settings()
+_FICHA_GLUTEOS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "static",
+    "ficha-gluteos.jpg",
+)
+_ficha_gluteos_b64_cache: str | None = None
 
-    # Build the image URL: prefer explicit env var, fallback to base_url + static path
+
+def _load_ficha_gluteos_base64() -> str | None:
+    """Read and cache the gluteos flyer as base64 — avoids re-reading on every send."""
+    global _ficha_gluteos_b64_cache
+    if _ficha_gluteos_b64_cache is not None:
+        return _ficha_gluteos_b64_cache
+    try:
+        with open(_FICHA_GLUTEOS_PATH, "rb") as f:
+            _ficha_gluteos_b64_cache = base64.b64encode(f.read()).decode("ascii")
+        return _ficha_gluteos_b64_cache
+    except Exception as e:
+        logger.error(f"Failed to load ficha-gluteos.jpg from {_FICHA_GLUTEOS_PATH}: {e}")
+        return None
+
+
+async def _send_ficha_gluteos(conv: ConversationState) -> None:
+    """Send the Plan Glúteos promotional image to the user.
+
+    Preferred path: upload local file as base64 (no public URL needed).
+    Fallback: explicit env var URL, or BASE_URL + /static path.
+    """
+    settings = get_settings()
+    caption = "Plan Glúteos — Tonificación y Reafirmación 💪"
+
+    # Path 1: local file as base64 (always works if file is bundled in the image)
+    b64 = _load_ficha_gluteos_base64()
+    if b64:
+        sent = await evolution.send_media_message(
+            conv.phone,
+            media_type="image",
+            media_base64=b64,
+            file_name="ficha-gluteos.jpg",
+            mime_type="image/jpeg",
+            caption=caption,
+        )
+        if sent:
+            logger.info(f"[{conv.phone}] Sent ficha gluteos via base64")
+            return
+        logger.warning(f"[{conv.phone}] base64 send failed, trying URL fallback")
+
+    # Path 2: URL fallback
     ficha_url = settings.media_ficha_gluteos_url
     if not ficha_url and settings.base_url:
         ficha_url = f"{settings.base_url.rstrip('/')}/static/ficha-gluteos.jpg"
 
-    if not ficha_url:
-        logger.warning(f"[{conv.phone}] No ficha URL configured (set MEDIA_FICHA_GLUTEOS_URL or BASE_URL)")
-        return
+    if ficha_url:
+        sent = await evolution.send_media_message(
+            conv.phone,
+            media_url=ficha_url,
+            media_type="image",
+            caption=caption,
+        )
+        if sent:
+            logger.info(f"[{conv.phone}] Sent ficha gluteos via URL ({ficha_url})")
+            return
 
-    sent = await evolution.send_media_message(
-        conv.phone,
-        media_url=ficha_url,
-        media_type="image",
-        caption="Plan Glúteos — Tonificación y Reafirmación 💪",
-    )
-    if sent:
-        logger.info(f"[{conv.phone}] Sent ficha gluteos image")
-    else:
-        logger.error(f"[{conv.phone}] Failed to send ficha gluteos image (url={ficha_url})")
+    # Both paths failed — notify Yésica so she can send it manually
+    logger.error(f"[{conv.phone}] FAILED to send ficha gluteos (no working method)")
+    try:
+        name = conv.collected_name or conv.user_display_name or "Cliente"
+        await evolution.send_text_message(
+            settings.yesica_phone,
+            f"⚠️ *No se pudo enviar ficha Plan Glúteos*\n\n"
+            f"*Cliente:* {name}\n"
+            f"*WhatsApp:* +{conv.phone}\n\n"
+            f"El bot le informó el precio pero no logró enviar la imagen. "
+            f"Por favor envía tú la ficha manualmente."
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify Yésica of ficha send failure: {e}")
 
 
 # ---------------------------------------------------------------------------

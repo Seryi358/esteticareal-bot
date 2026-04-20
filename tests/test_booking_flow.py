@@ -156,7 +156,8 @@ class TestDoubleBookingPrevention:
         with (
             patch("services.calendar.verify_slot_available", side_effect=fake_verify),
             patch("services.calendar.create_appointment", side_effect=fake_create),
-            patch("services.calendar._check_for_duplicate_events", side_effect=fake_check_dups),
+            patch("services.calendar._resolve_duplicate_events", side_effect=fake_check_dups),
+            patch("services.calendar.find_existing_booking_for_phone", new_callable=AsyncMock, return_value=None),
         ):
             results = await asyncio.gather(
                 book_slot_atomic(slot, "Maria", "573001111111"),
@@ -191,7 +192,8 @@ class TestDoubleBookingPrevention:
         with (
             patch("services.calendar.verify_slot_available", side_effect=fake_verify),
             patch("services.calendar.create_appointment", side_effect=fake_create),
-            patch("services.calendar._check_for_duplicate_events", side_effect=fake_check_dups),
+            patch("services.calendar._resolve_duplicate_events", side_effect=fake_check_dups),
+            patch("services.calendar.find_existing_booking_for_phone", new_callable=AsyncMock, return_value=None),
         ):
             results = await asyncio.gather(
                 book_slot_atomic(slot_a, "Maria", "573001111111"),
@@ -939,20 +941,23 @@ class TestRetryGoesAtomicPath:
 
 
 class TestDuplicateEventCleanup:
-    """When duplicate events are detected, they must be deleted."""
+    """When duplicate events are detected, deterministic winner is kept and losers deleted."""
 
     @pytest.mark.asyncio
-    async def test_duplicate_events_get_deleted(self):
-        """_check_for_duplicate_events must delete other events in the same slot."""
-        from services.calendar import _check_for_duplicate_events
+    async def test_duplicate_loser_gets_deleted(self):
+        """_resolve_duplicate_events keeps earliest-created winner and deletes losers."""
+        from services.calendar import _resolve_duplicate_events
 
         slot = _future_slot()
         our_event_id = "evt_ours"
         duplicate_id = "evt_duplicate"
 
+        # our event created FIRST → we are winner, duplicate is loser
         fake_events = [
-            {"id": our_event_id, "start": {"dateTime": slot.isoformat()}, "summary": "Our event"},
-            {"id": duplicate_id, "start": {"dateTime": slot.isoformat()}, "summary": "Duplicate"},
+            {"id": our_event_id, "start": {"dateTime": slot.isoformat()},
+             "summary": "Our event", "created": "2026-04-20T10:00:00Z"},
+            {"id": duplicate_id, "start": {"dateTime": slot.isoformat()},
+             "summary": "Duplicate", "created": "2026-04-20T10:00:02Z"},
         ]
 
         deleted_ids = []
@@ -968,16 +973,53 @@ class TestDuplicateEventCleanup:
             patch("services.calendar._get_service", return_value=fake_service),
             patch("services.calendar.delete_event", side_effect=mock_delete),
         ):
-            has_dups = await _check_for_duplicate_events(slot, our_event_id)
+            canonical = await _resolve_duplicate_events(slot, our_event_id)
 
-        assert has_dups is True
+        assert canonical is not None
+        assert canonical.get("id") == our_event_id  # earlier created → wins
         assert duplicate_id in deleted_ids
-        assert our_event_id not in deleted_ids  # Must NOT delete our own event
+        assert our_event_id not in deleted_ids  # Winner must not be deleted
 
     @pytest.mark.asyncio
-    async def test_no_duplicates_means_no_deletion(self):
-        """When no duplicates exist, nothing should be deleted."""
-        from services.calendar import _check_for_duplicate_events
+    async def test_our_event_is_loser_gets_self_deleted(self):
+        """If our event lost the deterministic race, it must be deleted (convergence)."""
+        from services.calendar import _resolve_duplicate_events
+
+        slot = _future_slot()
+        our_event_id = "evt_ours"
+        winner_id = "evt_winner"
+
+        # winner created FIRST → we are loser
+        fake_events = [
+            {"id": winner_id, "start": {"dateTime": slot.isoformat()},
+             "summary": "Winner", "created": "2026-04-20T10:00:00Z"},
+            {"id": our_event_id, "start": {"dateTime": slot.isoformat()},
+             "summary": "Our event (late)", "created": "2026-04-20T10:00:02Z"},
+        ]
+
+        deleted_ids = []
+
+        async def mock_delete(event_id):
+            deleted_ids.append(event_id)
+            return True
+
+        fake_service = MagicMock()
+        fake_service.events().list().execute.return_value = {"items": fake_events}
+
+        with (
+            patch("services.calendar._get_service", return_value=fake_service),
+            patch("services.calendar.delete_event", side_effect=mock_delete),
+        ):
+            canonical = await _resolve_duplicate_events(slot, our_event_id)
+
+        assert canonical is not None
+        assert canonical.get("id") == winner_id
+        assert our_event_id in deleted_ids  # losers (including us) get deleted
+
+    @pytest.mark.asyncio
+    async def test_no_duplicates_returns_none(self):
+        """When no duplicates exist, _resolve_duplicate_events returns None."""
+        from services.calendar import _resolve_duplicate_events
 
         slot = _future_slot()
         our_event_id = "evt_only_one"
@@ -993,10 +1035,42 @@ class TestDuplicateEventCleanup:
             patch("services.calendar._get_service", return_value=fake_service),
             patch("services.calendar.delete_event", new_callable=AsyncMock) as mock_delete,
         ):
-            has_dups = await _check_for_duplicate_events(slot, our_event_id)
+            canonical = await _resolve_duplicate_events(slot, our_event_id)
 
-        assert has_dups is False
+        assert canonical is None
         mock_delete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_phone_idempotency_prevents_duplicate_create(self):
+        """find_existing_booking_for_phone short-circuits booking if phone already has event."""
+        from services.calendar import book_slot_atomic, _slot_locks
+        _slot_locks.clear()
+
+        slot = _future_slot()
+        existing_event = {
+            "id": "evt_existing",
+            "summary": "Videollamada Valoración Maria 573001111111",
+            "start": {"dateTime": slot.isoformat()},
+        }
+
+        create_calls = []
+
+        async def fake_create(*a, **k):
+            create_calls.append(True)
+            return {"id": "evt_new"}
+
+        with (
+            patch("services.calendar.find_existing_booking_for_phone",
+                  new_callable=AsyncMock, return_value=existing_event),
+            patch("services.calendar.verify_slot_available",
+                  new_callable=AsyncMock, return_value=True),
+            patch("services.calendar.create_appointment", side_effect=fake_create),
+        ):
+            ok, event = await book_slot_atomic(slot, "Maria", "573001111111")
+
+        assert ok is True
+        assert event is existing_event  # returns existing instead of creating
+        assert len(create_calls) == 0  # create_appointment MUST NOT be called
 
 
 class TestConcurrentBookingWithFlakiness:
@@ -1030,7 +1104,8 @@ class TestConcurrentBookingWithFlakiness:
         with (
             patch("services.calendar.verify_slot_available", side_effect=flaky_verify),
             patch("services.calendar.create_appointment", side_effect=fake_create),
-            patch("services.calendar._check_for_duplicate_events", side_effect=fake_check_dups),
+            patch("services.calendar._resolve_duplicate_events", side_effect=fake_check_dups),
+            patch("services.calendar.find_existing_booking_for_phone", new_callable=AsyncMock, return_value=None),
         ):
             # Launch 3 concurrent booking attempts for the same slot
             results = await asyncio.gather(

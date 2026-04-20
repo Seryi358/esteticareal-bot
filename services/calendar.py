@@ -246,6 +246,64 @@ def _overlaps_busy(
     return False
 
 
+async def find_existing_booking_for_phone(
+    phone: str,
+    slot: datetime,
+    window_hours: int = 4,
+) -> dict | None:
+    """Return an existing Calendar event for this phone within ±window_hours of slot.
+
+    Idempotency guard: prevents double-booking the same client when webhooks are
+    retried, a deploy overlaps two containers, or a background task races.
+    Matches by phone number embedded in event summary/description (format used
+    by create_appointment).
+    """
+    service = _get_service()
+    if not service:
+        return None
+
+    settings = get_settings()
+    if slot.tzinfo is None:
+        slot = slot.replace(tzinfo=COLOMBIA_TZ)
+    search_start = slot.astimezone(COLOMBIA_TZ) - timedelta(hours=window_hours)
+    search_end = slot.astimezone(COLOMBIA_TZ) + timedelta(hours=window_hours)
+
+    # Normalize phone variants — summary uses '+{phone}' but q matches substrings
+    phone_digits = "".join(c for c in phone if c.isdigit())
+    if not phone_digits:
+        return None
+
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _search():
+            return service.events().list(
+                calendarId=settings.google_calendar_id,
+                timeMin=search_start.isoformat(),
+                timeMax=search_end.isoformat(),
+                q=phone_digits,
+                singleEvents=True,
+                maxResults=10,
+            ).execute().get("items", [])
+
+        events = await asyncio.wait_for(
+            loop.run_in_executor(None, _search), timeout=10
+        )
+
+        for ev in events:
+            blob = (ev.get("summary", "") + " " + ev.get("description", ""))
+            if phone_digits in "".join(c for c in blob if c.isdigit()):
+                logger.info(
+                    f"IDEMPOTENCY: phone {phone_digits} already has event "
+                    f"{ev.get('id')} '{ev.get('summary')}' near {slot.isoformat()}"
+                )
+                return ev
+    except Exception as e:
+        logger.error(f"Error searching existing bookings for {phone_digits}: {e}")
+
+    return None
+
+
 async def verify_slot_available(slot: datetime) -> bool | None:
     """Re-check Google Calendar right before creating an event.
 
@@ -599,6 +657,17 @@ async def book_slot_atomic(
     lock = await _get_slot_lock(slot)
 
     async with lock:
+        # Idempotency: if this phone already has a booking near this slot,
+        # return it instead of creating a duplicate. Survives zero-downtime
+        # deploys, webhook retries, and concurrent coroutines from the same user.
+        existing = await find_existing_booking_for_phone(user_phone, slot, window_hours=4)
+        if existing:
+            logger.warning(
+                f"book_slot_atomic: phone {user_phone} already has event "
+                f"{existing.get('id')} near {slot.isoformat()} — reusing, NOT creating duplicate"
+            )
+            return True, existing
+
         is_available = await verify_slot_available(slot)
         if is_available is None:
             # Calendar service unavailable — BLOCK booking (fail-closed).
@@ -629,24 +698,36 @@ async def book_slot_atomic(
             )
             return True, None
 
-        # Post-creation safety: verify no duplicates were created
-        has_duplicates = await _check_for_duplicate_events(slot, event.get("id"))
-        if has_duplicates:
-            logger.error(
-                f"DUPLICATE DETECTED for slot {slot.isoformat()} — "
-                f"this should not happen with locking. Keeping our event."
+        # Post-creation safety: if duplicates exist (cross-process race during
+        # zero-downtime deploy or webhook retry), pick deterministic winner and
+        # delete losers. Both racing coroutines converge on the same winner.
+        canonical = await _resolve_duplicate_events(slot, event.get("id"))
+        if canonical and canonical.get("id") != event.get("id"):
+            logger.warning(
+                f"book_slot_atomic: our event {event.get('id')} was NOT the winner — "
+                f"canonical is {canonical.get('id')}. Returning canonical to caller."
             )
+            return True, canonical
 
         return True, event
 
 
-async def _check_for_duplicate_events(
+async def _resolve_duplicate_events(
     slot: datetime, our_event_id: str | None
-) -> bool:
-    """Safety net: check if multiple events exist in the same slot after creation."""
+) -> dict | None:
+    """If multiple events exist in the same slot, keep the deterministic winner
+    and delete losers. Called after create_appointment as a safety net against
+    cross-process races (zero-downtime deploys, webhook retries).
+
+    Winner rule (deterministic — both racing coroutines converge):
+      min by (created_timestamp, event_id). Earliest-created wins; ties broken
+      by event_id lexicographic order.
+
+    Returns the canonical (winning) event, or None if no duplicates / error.
+    """
     service = _get_service()
-    if not service or not our_event_id:
-        return False
+    if not service:
+        return None
 
     settings = get_settings()
     slot_start = slot.astimezone(COLOMBIA_TZ)
@@ -667,28 +748,36 @@ async def _check_for_duplicate_events(
             loop.run_in_executor(None, _check), timeout=10
         )
 
-        timed = [
-            ev for ev in events
-            if "dateTime" in ev.get("start", {}) and ev.get("id") != our_event_id
-        ]
-        if timed:
-            logger.error(
-                f"DUPLICATE DETECTED: {len(timed)} OTHER events in slot "
-                f"{slot_start.isoformat()}: {[e.get('summary') for e in timed]}"
-            )
-            # Delete duplicate events to prevent double-booking from persisting
-            for dup in timed:
-                dup_id = dup.get("id")
-                if dup_id:
-                    try:
-                        await delete_event(dup_id)
-                        logger.warning(
-                            f"Deleted duplicate event {dup_id}: '{dup.get('summary')}'"
-                        )
-                    except Exception as del_err:
-                        logger.error(f"Failed to delete duplicate {dup_id}: {del_err}")
-            return True
-    except Exception as e:
-        logger.error(f"Error checking for duplicates: {e}")
+        timed = [ev for ev in events if "dateTime" in ev.get("start", {})]
+        if len(timed) <= 1:
+            return None  # No duplicates
 
-    return False
+        # Deterministic winner selection
+        def _sort_key(ev: dict) -> tuple:
+            return (ev.get("created", ""), ev.get("id", ""))
+
+        winner = min(timed, key=_sort_key)
+        losers = [ev for ev in timed if ev.get("id") != winner.get("id")]
+
+        logger.error(
+            f"DUPLICATE DETECTED in slot {slot_start.isoformat()}: "
+            f"{len(timed)} events, winner={winner.get('id')}, losers={[l.get('id') for l in losers]}"
+        )
+
+        for loser in losers:
+            loser_id = loser.get("id")
+            if not loser_id:
+                continue
+            try:
+                await delete_event(loser_id)
+                logger.warning(
+                    f"Deleted duplicate loser {loser_id} '{loser.get('summary')}' "
+                    f"(winner kept: {winner.get('id')})"
+                )
+            except Exception as del_err:
+                logger.error(f"Failed to delete duplicate {loser_id}: {del_err}")
+
+        return winner
+    except Exception as e:
+        logger.error(f"Error resolving duplicates: {e}")
+        return None

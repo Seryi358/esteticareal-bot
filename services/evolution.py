@@ -59,26 +59,38 @@ def is_bot_sent_message(message_id: str) -> bool:
 
 async def send_media_message(
     phone: str,
-    media_url: str,
+    media_url: str = "",
     media_type: str = "image",
     caption: str = "",
+    media_base64: str = "",
+    file_name: str = "",
+    mime_type: str = "",
 ) -> bool:
     """Send an image or video via Evolution API.
 
     media_type: 'image' or 'video'
-    media_url: publicly accessible URL of the media file
+    Provide EITHER media_url (public URL) OR media_base64 (raw base64 of the file).
+    base64 path is preferred when the server has no public domain.
     """
+    if not media_url and not media_base64:
+        logger.error(f"send_media_message: no media_url or media_base64 for {phone}")
+        return False
+
     url = f"{_base_url()}/message/sendMedia/{_instance()}"
-    payload = {
+    payload: dict = {
         "number": phone,
         "mediatype": media_type,
-        "media": media_url,
+        "media": media_base64 or media_url,
         "delay": 1200,
     }
     if caption:
         payload["caption"] = caption
+    if file_name:
+        payload["fileName"] = file_name
+    if mime_type:
+        payload["mimetype"] = mime_type
     try:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=60) as client:
             response = await client.post(url, json=payload, headers=_headers())
             response.raise_for_status()
             data = response.json()
