@@ -46,58 +46,144 @@ async def _get_slot_lock(slot: datetime) -> asyncio.Lock:
         return _slot_locks[key]
 
 
-def _get_credentials() -> Credentials | None:
+# Track consecutive refresh failures so we only alert Yésica once per outage
+_refresh_failure_count = 0
+_last_alert_sent_at: float = 0.0
+
+
+def _load_from_env_var() -> Credentials | None:
     import base64, json as _json
-    settings = get_settings()
-    token_path = os.path.join(settings.credentials_dir, "token.json")
-    creds = None
-
-    # Priority 1: GOOGLE_TOKEN_JSON env var (base64-encoded) — used in production
     token_b64 = os.environ.get("GOOGLE_TOKEN_JSON")
-    if token_b64:
-        try:
-            token_data = base64.b64decode(token_b64).decode()
-            creds = Credentials.from_authorized_user_info(
-                _json.loads(token_data), SCOPES
-            )
-        except Exception as e:
-            logger.error(f"Error loading token from env var: {e}")
-
-    # Priority 2: token.json file — used in local development
-    if not creds and os.path.exists(token_path):
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-
-    if creds and creds.expired and creds.refresh_token:
-        try:
-            creds.refresh(Request())
-            # Persist refreshed token to file
-            with open(token_path, "w") as f:
-                f.write(creds.to_json())
-            # Also update in-memory env var so subsequent calls in this process
-            # don't start from the stale base64 token every time
-            try:
-                import base64 as _b64
-                os.environ["GOOGLE_TOKEN_JSON"] = _b64.b64encode(
-                    creds.to_json().encode()
-                ).decode()
-            except Exception:
-                pass  # Non-critical — file fallback still works
-            logger.info("Google credentials refreshed successfully")
-        except Exception as e:
-            logger.error(f"Error refreshing Google credentials: {e}")
-            return None
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and not creds.refresh_token:
-            logger.error(
-                "Google credentials expired and NO refresh_token available. "
-                "Re-run setup_calendar.py to generate a new token."
-            )
-        else:
-            logger.error("Google credentials invalid or missing")
+    if not token_b64:
+        return None
+    try:
+        token_data = base64.b64decode(token_b64).decode()
+        return Credentials.from_authorized_user_info(_json.loads(token_data), SCOPES)
+    except Exception as e:
+        logger.error(f"Error loading token from env var: {e}")
         return None
 
-    return creds
+
+def _load_from_file(token_path: str) -> Credentials | None:
+    if not os.path.exists(token_path):
+        return None
+    try:
+        return Credentials.from_authorized_user_file(token_path, SCOPES)
+    except Exception as e:
+        logger.error(f"Error loading token from file {token_path}: {e}")
+        return None
+
+
+def _try_refresh(creds: Credentials, token_path: str) -> bool:
+    """Refresh and persist. Returns True on success."""
+    import base64 as _b64
+    try:
+        creds.refresh(Request())
+        try:
+            os.makedirs(os.path.dirname(token_path), exist_ok=True)
+            with open(token_path, "w") as f:
+                f.write(creds.to_json())
+        except Exception as pe:
+            logger.error(f"Refresh OK but failed to persist to {token_path}: {pe}")
+        try:
+            os.environ["GOOGLE_TOKEN_JSON"] = _b64.b64encode(
+                creds.to_json().encode()
+            ).decode()
+        except Exception:
+            pass
+        logger.info("Google credentials refreshed successfully")
+        return True
+    except Exception as e:
+        logger.error(f"Refresh failed: {type(e).__name__}: {e}")
+        return False
+
+
+def _alert_yesica_credentials_down(reason: str) -> None:
+    """Fire-and-forget WhatsApp to Yésica when Calendar auth is dead.
+    Rate-limited to at most one alert per 6 hours to avoid spamming."""
+    global _last_alert_sent_at
+    import time
+    now = time.time()
+    if now - _last_alert_sent_at < 6 * 3600:
+        return
+    _last_alert_sent_at = now
+
+    async def _send():
+        try:
+            # Lazy import to avoid circular dependency at module load
+            from services import evolution as evo
+            from config import get_settings as _gs
+            msg = (
+                f"⚠️ *Bot de Estética Real — problema con Google Calendar*\n\n"
+                f"No puedo conectarme al calendario de citas.\n"
+                f"Motivo: {reason}\n\n"
+                f"Sergio debe regenerar el token con setup_calendar.py.\n"
+                f"Mientras tanto, agenda manualmente y el bot no podrá crear citas."
+            )
+            await evo.send_text_message(_gs().yesica_phone, msg)
+            logger.warning(f"Alerted Yésica about credentials failure: {reason}")
+        except Exception as e:
+            logger.error(f"Failed to alert Yésica: {e}")
+
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_send())
+    except RuntimeError:
+        pass  # no running loop (e.g. startup) — skip silently
+
+
+def _get_credentials() -> Credentials | None:
+    """Load Google credentials with two-level fallback + alerting.
+
+    Source priority: env var GOOGLE_TOKEN_JSON, then credentials/token.json
+    file (which may have been written by a prior refresh and persisted via
+    the volume mount in production). If the env-var token's refresh fails
+    with invalid_grant, we still try the file token before giving up.
+
+    After 3 consecutive failures we alert Yésica on WhatsApp (rate-limited
+    to once per 6h), so the bot can't silently rot for 13 days again.
+    """
+    global _refresh_failure_count
+    settings = get_settings()
+    token_path = os.path.join(settings.credentials_dir, "token.json")
+
+    sources: list[tuple[str, Credentials | None]] = [
+        ("env_var", _load_from_env_var()),
+        ("token_file", _load_from_file(token_path)),
+    ]
+    # Dedupe identical token objects if both sources returned same refresh_token
+    seen_refresh = set()
+    unique_sources: list[tuple[str, Credentials]] = []
+    for name, c in sources:
+        if c is None:
+            continue
+        rt = getattr(c, "refresh_token", None)
+        if rt and rt in seen_refresh:
+            continue
+        if rt:
+            seen_refresh.add(rt)
+        unique_sources.append((name, c))
+
+    last_error = "no credentials sources configured"
+    for name, creds in unique_sources:
+        if creds.valid:
+            _refresh_failure_count = 0
+            return creds
+        if creds.expired and creds.refresh_token:
+            if _try_refresh(creds, token_path):
+                _refresh_failure_count = 0
+                return creds
+            last_error = f"{name}: refresh failed (likely invalid_grant)"
+            continue
+        last_error = f"{name}: invalid or missing refresh_token"
+
+    _refresh_failure_count += 1
+    logger.error(
+        f"Google credentials unavailable (failure #{_refresh_failure_count}): {last_error}"
+    )
+    if _refresh_failure_count >= 3:
+        _alert_yesica_credentials_down(last_error)
+    return None
 
 
 def _get_service():
