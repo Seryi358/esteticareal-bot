@@ -45,7 +45,7 @@ class ConversationState:
     reminder_confirmed: bool = False  # True when patient confirms attendance after reminder
     appointment_cancelled: bool = False  # True when appointment is cancelled (not rescheduled)
     escalated_at: Optional[str] = None  # ISO timestamp — when escalated_to_yesica phase started
-    booking_type: str = "valoracion"  # "valoracion" | "tratamiento" — determines appointment labels
+    booking_type: str = "tratamiento"  # always "tratamiento" (presencial). Kept for historical JSON compat.
     messages: list = field(default_factory=list)
 
     def to_dict(self) -> dict:

@@ -257,30 +257,28 @@ async def _handle_image(
     description = analysis.get("description", "")
     suggestion = analysis.get("response_suggestion", "")
 
-    # Handle payment screenshots (legacy support)
     if image_type == "PAYMENT":
         conv.inject_system_event(
-            f"IMAGE_ANALYSIS: El usuario envio lo que parece ser un comprobante de pago "
-            f"({description}). La valoración es gratuita este mes, no necesita pagar. "
-            f"Aclara amablemente que la valoración no tiene costo y pregunta si quiere agendar."
+            f"IMAGE_ANALYSIS: La clienta envió lo que parece ser un comprobante de pago "
+            f"({description}). Aclara amablemente que el pago se hace directamente en el "
+            f"consultorio el día de la cita, no se requiere pago previo. Pregunta si "
+            f"quiere agendar su primera sesión presencial."
         )
 
     elif image_type == "BODY":
         zone = analysis.get("body_zone", "corporal")
         conv.inject_system_event(
-            f"IMAGE_ANALYSIS: El usuario envio una foto de su zona {zone}. "
-            f"Descripcion: {description}. "
-            f"Responde con empatia, muestra interes profesional por su caso, "
-            f"menciona que Yesica podria evaluarla en la valoracion gratuita "
-            f"y guia hacia el agendamiento."
+            f"IMAGE_ANALYSIS: La clienta envió una foto de su zona {zone}. "
+            f"Descripción: {description}. "
+            f"Responde con empatía, muestra interés profesional por su caso, "
+            f"y orienta hacia agendar una cita presencial con Yésica donde ella arma el plan."
         )
 
     elif image_type == "FACE":
         conv.inject_system_event(
-            f"IMAGE_ANALYSIS: El usuario envio una foto de su rostro o piel. "
-            f"Descripcion: {description}. "
-            f"Responde con empatia, menciona tratamientos faciales relevantes "
-            f"y ofrece la valoracion gratuita con Yesica."
+            f"IMAGE_ANALYSIS: La clienta envió una foto de su rostro o piel. "
+            f"Descripción: {description}. "
+            f"Responde con empatía y orienta a agendar una cita presencial con Yésica."
         )
 
     elif image_type == "BEFORE_AFTER":
@@ -334,7 +332,7 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
                 conv.slots_fetched_at = None
                 conv.meeting_type = None
                 conv.meet_link = None
-                conv.booking_type = "valoracion"
+                conv.booking_type = "tratamiento"
                 conv.reminder_sent = False
                 conv.reminder_day_before_sent = False
                 conv.reminder_confirmation_pending = False
@@ -509,7 +507,7 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
-    conv.booking_type = "valoracion"
+    conv.booking_type = "tratamiento"
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
     conv.reminder_confirmation_pending = False
@@ -719,7 +717,7 @@ async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -
     conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
-    conv.booking_type = "valoracion"
+    conv.booking_type = "tratamiento"
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
     conv.reminder_confirmation_pending = False
@@ -823,7 +821,7 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
     greeting = f"{name}, tu" if name else "Tu"
 
     cancel_msg = (
-        f"{greeting} cita de valoración del {formatted_dt} fue cancelada "
+        f"{greeting} cita del {formatted_dt} fue cancelada "
         f"automáticamente porque no pudimos confirmar tu asistencia.\n\n"
         f"Si quieres agendar de nuevo, escríbeme y con gusto buscamos un horario 😊"
     )
@@ -837,7 +835,7 @@ async def _send_auto_cancel_if_needed_locked(phone: str) -> bool:
     conv.slots_fetched_at = None
     conv.meeting_type = None
     conv.meet_link = None
-    conv.booking_type = "valoracion"
+    conv.booking_type = "tratamiento"
     conv.reminder_sent = False
     conv.reminder_day_before_sent = False
     conv.reminder_confirmation_pending = False
@@ -1146,24 +1144,13 @@ async def _handle_slot_confirmation(conv: ConversationState, text: str) -> None:
     if decision == "yes":
         logger.info(f"[{conv.phone}] AI: user confirmed slot")
         _confirmation_attempts.pop(conv.phone, None)
-        if conv.booking_type == "tratamiento":
-            # Tratamiento is presencial — skip meeting type, default to whatsapp for calendar
-            conv.meeting_type = "whatsapp"
-            conv.phase = "collecting_data"
-            conv.inject_system_event(
-                "SLOT_CONFIRMED: El usuario confirmó el horario para su tratamiento de glúteos. "
-                "Es una cita PRESENCIAL en el consultorio. Solo falta el nombre completo "
-                "para confirmar la cita. Pídelo de forma natural."
-            )
-        else:
-            conv.phase = "awaiting_meeting_type"
-            conv.inject_system_event(
-                "SLOT_CONFIRMED: El usuario confirmó el horario. "
-                "Ahora pregúntale cómo prefiere la videollamada: "
-                "por *WhatsApp* o por *Google Meet*. "
-                "Dile algo como: 'Perfecto, ¿prefieres que la valoración sea "
-                "por videollamada de WhatsApp o por Google Meet?'"
-            )
+        # All appointments are presencial now — skip meeting_type, go to collecting_data
+        conv.meeting_type = "presencial"
+        conv.phase = "collecting_data"
+        conv.inject_system_event(
+            "SLOT_CONFIRMED: La clienta confirmó el horario para su cita presencial. "
+            "Solo falta el nombre completo para confirmar. Pídelo de forma natural."
+        )
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
         return
@@ -1244,57 +1231,21 @@ def _clear_attempt_counters(phone: str) -> None:
 
 
 async def _handle_meeting_type_selection(conv: ConversationState, text: str) -> None:
-    """Handle user's choice between WhatsApp videocall and Google Meet — GPT interprets."""
-    chosen = await ai.interpret_meeting_type(text)
-
-    if chosen:
-        _meeting_type_attempts.pop(conv.phone, None)
-        conv.meeting_type = chosen
-        logger.info(f"[{conv.phone}] AI: meeting type chosen: {chosen}")
-        has_name = conv.collected_name or conv.user_display_name
-        if has_name:
-            conv.phase = "collecting_data"
-            await _try_collect_data_and_schedule(conv)
-        else:
-            conv.phase = "collecting_data"
-            conv.inject_system_event(
-                "INSTRUCCION: Ya tienes el horario y el tipo de videollamada. "
-                "Solo falta el nombre completo del usuario para agendar la cita. "
-                "Pídelo de forma natural."
-            )
-            reply = await _generate_reply(conv)
-            await _send_and_record(conv, reply)
-        return
-
-    # Ambiguous — track attempts, default to WhatsApp after 3
-    attempts = _meeting_type_attempts.get(conv.phone, 0) + 1
-    _meeting_type_attempts[conv.phone] = attempts
-
-    if attempts >= 3:
-        logger.info(f"[{conv.phone}] 3 ambiguous meeting type attempts — defaulting to WhatsApp")
-        _meeting_type_attempts.pop(conv.phone, None)
-        conv.meeting_type = "whatsapp"
-        has_name = conv.collected_name or conv.user_display_name
-        if has_name:
-            conv.phase = "collecting_data"
-            await _try_collect_data_and_schedule(conv)
-        else:
-            conv.phase = "collecting_data"
-            conv.inject_system_event(
-                "INSTRUCCION: Procedemos con videollamada de WhatsApp. "
-                "Solo falta el nombre completo del usuario. Pídelo de forma natural."
-            )
-            reply = await _generate_reply(conv)
-            await _send_and_record(conv, reply)
-        return
-
-    conv.inject_system_event(
-        "INSTRUCCION: El usuario respondió pero no queda claro si prefiere "
-        "WhatsApp o Google Meet. Pregunta de forma directa y sencilla: "
-        "'¿Por WhatsApp o por Google Meet?'"
-    )
-    reply = await _generate_reply(conv)
-    await _send_and_record(conv, reply)
+    """Legacy handler for conversations loaded from old JSONs still in awaiting_meeting_type.
+    All new appointments are presencial; force that and advance to data collection."""
+    _meeting_type_attempts.pop(conv.phone, None)
+    conv.meeting_type = "presencial"
+    conv.phase = "collecting_data"
+    has_name = conv.collected_name or conv.user_display_name
+    if has_name:
+        await _try_collect_data_and_schedule(conv)
+    else:
+        conv.inject_system_event(
+            "INSTRUCCION: Ya tienes el horario para la cita presencial. Solo falta "
+            "el nombre completo del usuario para confirmar. Pídelo de forma natural."
+        )
+        reply = await _generate_reply(conv)
+        await _send_and_record(conv, reply)
 
 
 # ---------------------------------------------------------------------------
@@ -1355,8 +1306,6 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
             # Notify Yesica for manual booking
             settings = get_settings()
             name = conv.collected_name or conv.user_display_name or "Cliente"
-            mt = conv.meeting_type or "whatsapp"
-            mt_label = "Google Meet" if mt == "meet" else "Videollamada WhatsApp"
             try:
                 await evolution.send_text_message(
                     settings.yesica_phone,
@@ -1364,7 +1313,7 @@ async def _try_collect_data_and_schedule(conv: ConversationState) -> None:
                     f"*Paciente:* {name}\n"
                     f"*WhatsApp:* +{conv.phone}\n"
                     f"*Horario solicitado:* {formatted_dt}\n"
-                    f"*Tipo:* {mt_label}\n\n"
+                    f"*Tipo:* Cita presencial\n\n"
                     f"Error técnico: {str(e)[:100]}\n"
                     f"Por favor crea el evento manualmente y confirma al paciente."
                 )
@@ -1469,7 +1418,6 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
         # Notify Yesica for manual booking
         settings = get_settings()
         name = conv.collected_name or conv.user_display_name or "Cliente"
-        mt_label = "Google Meet" if meeting_type == "meet" else "Videollamada WhatsApp"
         try:
             await evolution.send_text_message(
                 settings.yesica_phone,
@@ -1477,7 +1425,7 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
                 f"*Paciente:* {name}\n"
                 f"*WhatsApp:* +{conv.phone}\n"
                 f"*Horario solicitado:* {formatted_dt}\n"
-                f"*Tipo:* {mt_label}\n\n"
+                f"*Tipo:* Cita presencial\n\n"
                 f"El calendario no respondió. Por favor crea el evento manualmente "
                 f"y confirma al paciente."
             )
@@ -1488,76 +1436,25 @@ async def _create_appointment_from_saved_slot(conv: ConversationState) -> None:
     # ── Event created successfully — confirm to user ──
     conv.phase = "appointment_confirmed"
     conv.calendar_event_id = event.get("id")
-
-    meet_link = ""
-    if meeting_type == "meet":
-        meet_link = event.get("hangoutLink", "")
-        conv.meet_link = meet_link
-        if not meet_link:
-            logger.warning(f"[{conv.phone}] Google Calendar returned no hangoutLink — falling back to WhatsApp videocall")
-            conv.meeting_type = "whatsapp"
-            meeting_type = "whatsapp"
+    conv.meeting_type = "presencial"
+    conv.meet_link = ""
 
     name = conv.user_display_name or conv.collected_name or ""
     greeting = f"{name}, te" if name else "Te"
 
-    # Dynamic label based on booking type
-    is_tratamiento = conv.booking_type == "tratamiento"
-    cita_label = "tu tratamiento de glúteos" if is_tratamiento else "tu valoración virtual"
+    confirmation_msg = (
+        f"{greeting} confirmo tu cita presencial para el "
+        f"{formatted_dt}.\n\n"
+        f"📍 Te esperamos en el consultorio en Bello, cerca de la Estación Madera del Metro (línea A).\n\n"
+        f"Si necesitas cambiarla o cancelarla, puedes escribirme por este WhatsApp."
+    )
+    await evolution.send_text_message(conv.phone, confirmation_msg)
+    conv.add_message("assistant", confirmation_msg)
 
-    if meeting_type == "meet" and meet_link:
-        confirmation_msg = (
-            f"{greeting} confirmo que {cita_label} quedó agendada para el "
-            f"{formatted_dt}.\n\n"
-            f"💻 La reunión será por Google Meet, te comparto tu enlace único"
-        )
-        follow_msg = (
-            "Entra al enlace el día y hora de tu cita. "
-            "Si necesitas cambiarla o cancelarla, puedes escribirme por este WhatsApp 😊"
-        )
-        await evolution.send_text_message(conv.phone, confirmation_msg)
-        await asyncio.sleep(1.5)
-        link_sent = await evolution.send_text_message(conv.phone, meet_link)
-        if not link_sent:
-            await asyncio.sleep(3)
-            link_sent = await evolution.send_text_message(conv.phone, meet_link)
-            if not link_sent:
-                logger.error(f"[{conv.phone}] CRITICAL: Meet link failed to send after retry — notifying Yesica")
-                await evolution.send_text_message(
-                    settings.yesica_phone,
-                    f"⚠️ No se pudo enviar el enlace de Meet al cliente +{conv.phone}. "
-                    f"Enlace: {meet_link} — por favor envíalo manualmente."
-                )
-        await asyncio.sleep(1.5)
-        await evolution.send_text_message(conv.phone, follow_msg)
-        conv.add_message("assistant", f"{confirmation_msg} [MSG] {meet_link} [MSG] {follow_msg}")
-    else:
-        if is_tratamiento:
-            confirmation_msg = (
-                f"{greeting} confirmo que {cita_label} quedó agendado para el "
-                f"{formatted_dt}.\n\n"
-                f"📲 Yésica te atenderá presencialmente en el consultorio en Bello, "
-                f"cerca de la Estación Madera del Metro.\n\n"
-                f"Si necesitas cambiar o cancelar, puedes escribirme por este WhatsApp."
-            )
-        else:
-            confirmation_msg = (
-                f"{greeting} confirmo que {cita_label} quedó agendada para el "
-                f"{formatted_dt}.\n\n"
-                f"📲 Yésica te llamará por videollamada de WhatsApp a este mismo número "
-                f"el día y hora de tu cita.\n\n"
-                f"Asegúrate de tener buena conexión a internet. Si necesitas cambiarla o cancelarla, "
-                f"puedes escribirme directamente por este WhatsApp."
-            )
-        await evolution.send_text_message(conv.phone, confirmation_msg)
-        conv.add_message("assistant", confirmation_msg)
-
-    booking_label = "Tratamiento de glúteos" if is_tratamiento else "Valoración virtual"
     conv.inject_system_event(
-        f"APPOINTMENT_CONFIRMED: {booking_label} creada y confirmada al usuario para {formatted_dt}. "
-        f"Tipo: {'Google Meet' if meeting_type == 'meet' else 'videollamada WhatsApp'}. "
+        f"APPOINTMENT_CONFIRMED: Cita presencial creada y confirmada a la clienta para {formatted_dt}. "
         f"Ya le enviaste la confirmación. "
-        f"Si el usuario responde, sé natural y breve. No repitas la información."
+        f"Si la clienta responde, sé natural y breve. No repitas la información."
     )
     asyncio.create_task(_notify_yesica_appointment(conv, formatted_dt))
     asyncio.create_task(
@@ -1697,8 +1594,7 @@ async def _send_followup_if_needed_locked(phone: str) -> bool:
     greeting = f"Hola {name}" if name else "Hola"
     followup_msg = (
         f"{greeting}, te escribo porque a Yésica le quedan pocos espacios esta semana "
-        f"para valoraciones virtuales. Recuerda que este mes la valoración por videollamada "
-        f"de WhatsApp no tiene costo. ¿Qué día te queda más fácil?"
+        f"en el consultorio. ¿Te agendo una cita? ¿Qué día te queda más fácil?"
     )
 
     await evolution.send_text_message(phone, followup_msg)
@@ -1743,13 +1639,9 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
     formatted_dt = _format_appointment_datetime(appointment)
     settings = get_settings()
 
-    meeting_type = conv.meeting_type or "whatsapp"
-    meet_link = conv.meet_link or ""
-
     # ---- Day-before reminder (20h to 26h before) ----
     if not conv.reminder_day_before_sent and 72000 <= time_until <= 93600:
         time_spanish = _format_time_spanish(appointment)
-        # Use actual date comparison to determine "mañana" vs specific date
         _today = datetime.now(COLOMBIA_TZ).date()
         _tomorrow = _today + timedelta(days=1)
         _appt_date = appointment.date()
@@ -1761,37 +1653,24 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
             "\n\nEn caso de no recibir confirmación, la cita será cancelada "
             "automáticamente para darle el espacio a otra paciente."
         )
-        if meeting_type == "meet" and meet_link:
-            day_before_msg = (
-                f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-                f"para confirmar tu valoración virtual de {_date_phrase} a las {time_spanish}.\n\n"
-                f"Por favor confírmanos tu asistencia 🙏\n\n"
-                f"Recuerda que la valoración será por Google Meet, acá te dejo tu enlace"
-                f"{auto_cancel_notice}"
-            )
-            await evolution.send_text_message(phone, day_before_msg)
-            await asyncio.sleep(1.5)
-            await evolution.send_text_message(phone, meet_link)
-            conv.add_message("assistant", f"{day_before_msg} [MSG] {meet_link}")
-        else:
-            day_before_msg = (
-                f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
-                f"para confirmar tu valoración virtual de {_date_phrase} a las {time_spanish}.\n\n"
-                f"Por favor confírmanos tu asistencia 🙏\n\n"
-                f"Recuerda que Yésica te llamará por videollamada de WhatsApp a este mismo número. "
-                f"Asegúrate de tener buena conexión a internet 😊"
-                f"{auto_cancel_notice}"
-            )
-            await evolution.send_text_message(phone, day_before_msg)
-            conv.add_message("assistant", day_before_msg)
+        day_before_msg = (
+            f"{greeting}, ¿cómo estás? Te escribe la asistente de Yésica de Estética Real "
+            f"para confirmar tu cita de {_date_phrase} a las {time_spanish}.\n\n"
+            f"Por favor confírmanos tu asistencia 🙏\n\n"
+            f"Recuerda que la cita es presencial en nuestro consultorio en Bello, "
+            f"cerca de la Estación Madera del Metro (línea A)."
+            f"{auto_cancel_notice}"
+        )
+        await evolution.send_text_message(phone, day_before_msg)
+        conv.add_message("assistant", day_before_msg)
 
-        # Notify Yésica — use same date phrase as patient message
         yesica_day_msg = (
             f"📋 *Recordatorio cita {_date_phrase}*\n\n"
             f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
             f"*WhatsApp:* +{phone}\n"
-            f"*Servicio:* {conv.service_interest or 'Valoración'}\n"
-            f"*Fecha:* {formatted_dt}"
+            f"*Servicio:* {conv.service_interest or 'Tratamiento'}\n"
+            f"*Fecha:* {formatted_dt}\n"
+            f"*Modalidad:* Presencial (consultorio)"
         )
         await evolution.send_text_message(settings.yesica_phone, yesica_day_msg)
 
@@ -1801,43 +1680,25 @@ async def _send_reminder_if_needed_locked(phone: str) -> bool:
         logger.info(f"[{phone}] Sent day-before reminder (appointment at {formatted_dt})")
 
     # ---- Same-day reminder (1.5h to 2.5h before) ----
-    # Skip if patient already confirmed via day-before reminder OR if day-before
-    # was sent but patient hasn't responded yet (avoid double-nagging)
     if not conv.reminder_sent and not conv.reminder_confirmed and not conv.reminder_confirmation_pending and 5400 <= time_until <= 9000:
         time_spanish = _format_time_spanish(appointment)
-        if meeting_type == "meet" and meet_link:
-            reminder_msg = (
-                f"{greeting}, te recuerdo que hoy tienes tu valoración virtual con Yésica "
-                f"a las {time_spanish}.\n\n"
-                f"Entra a tu enlace de Google Meet a la hora de la cita"
-            )
-            await evolution.send_text_message(phone, reminder_msg)
-            await asyncio.sleep(1.5)
-            await evolution.send_text_message(phone, meet_link)
-            conv.add_message("assistant", f"{reminder_msg} [MSG] {meet_link}")
-        else:
-            reminder_msg = (
-                f"{greeting}, te recuerdo que hoy tienes tu valoración virtual con Yésica "
-                f"a las {time_spanish}. "
-                f"Yésica te llamará por videollamada de WhatsApp a este mismo número. "
-                f"Asegúrate de tener buena conexión a internet 😊"
-            )
-            await evolution.send_text_message(phone, reminder_msg)
-            conv.add_message("assistant", reminder_msg)
+        reminder_msg = (
+            f"{greeting}, te recuerdo que hoy tienes tu cita con Yésica a las {time_spanish} "
+            f"en el consultorio en Bello (cerca de la Estación Madera del Metro)."
+        )
+        await evolution.send_text_message(phone, reminder_msg)
+        conv.add_message("assistant", reminder_msg)
 
-        # Notify Yésica too
         yesica_msg = (
-            f"⏰ *Recordatorio de cita*\n\n"
+            f"⏰ *Recordatorio de cita presencial*\n\n"
             f"*Paciente:* {conv.collected_name or name or 'Cliente'}\n"
             f"*WhatsApp:* +{phone}\n"
             f"*Fecha:* {formatted_dt}\n"
-            f"*Servicio:* {conv.service_interest or 'Valoración'}"
+            f"*Servicio:* {conv.service_interest or 'Tratamiento'}"
         )
         await evolution.send_text_message(settings.yesica_phone, yesica_msg)
 
         conv.reminder_sent = True
-        # Also set confirmation pending so auto-cancel works for same-day bookings
-        # (when day-before reminder window was missed)
         if not conv.reminder_confirmation_pending:
             conv.reminder_confirmation_pending = True
         sent_any = True
@@ -1938,30 +1799,14 @@ async def _notify_yesica_appointment(
     conv: ConversationState,
     appointment_dt: str,
 ) -> None:
-    """Notify Yésica when an appointment is booked."""
+    """Notify Yésica when an appointment is booked (always presencial)."""
     settings = get_settings()
     name = conv.collected_name or conv.user_display_name or "Pendiente"
-    meeting_type = conv.meeting_type or "whatsapp"
-    meet_link = conv.meet_link or ""
 
-    if meeting_type == "meet" and meet_link:
-        tipo_label = f"Google Meet\n*Enlace:* {meet_link}"
-        instruccion = "El cliente entrará al enlace de Meet el día de la cita 💻"
-    else:
-        tipo_label = "Videollamada de WhatsApp"
-        instruccion = "Recuerda llamar al cliente por videollamada de WhatsApp el día de la cita 📲"
-
-    is_tratamiento = conv.booking_type == "tratamiento"
-
-    if is_tratamiento:
-        header = "✅ *Nuevo tratamiento de glúteos agendado*"
-        servicio_line = f"*Servicio:* {conv.service_interest or 'Plan Glúteos $350.000'}"
-        tipo_line = f"*Tipo:* Tratamiento presencial"
-        instruccion = "La paciente viene al consultorio para su primera sesión del Plan Glúteos 💪"
-    else:
-        header = "✅ *Nueva valoración virtual agendada*"
-        servicio_line = f"*Servicio:* {conv.service_interest or 'Levantamiento de glúteos'}"
-        tipo_line = f"*Valoración:* Gratuita — {tipo_label}"
+    header = "✅ *Nueva cita presencial agendada*"
+    servicio_line = f"*Servicio:* {conv.service_interest or 'Tratamiento'}"
+    tipo_line = "*Tipo:* Cita presencial en consultorio"
+    instruccion = "La paciente viene al consultorio en Bello el día de la cita 📍"
 
     message = (
         f"{header}\n\n"
