@@ -1,4 +1,10 @@
-"""Tests for pure helper functions in bot/flow.py — no async, no external deps."""
+"""Tests for pure helper functions in bot/flow.py — no async, no external deps.
+
+Intent detection (reschedule / cancel / reminder confirm) is now handled by AI
+calls (services.ai.classify_appointment_change, classify_reminder_response).
+Those helpers are exercised in test_booking_flow.py with mocks — this file
+keeps only the pure-sync helpers.
+"""
 
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -6,10 +12,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from bot.flow import (
-    _wants_to_reschedule,
-    _is_reminder_confirmation,
-    _is_reminder_rejection,
-    _wants_to_cancel_only,
     _month_name,
     _format_time_spanish,
     _format_appointment_datetime,
@@ -19,143 +21,6 @@ from bot.flow import (
 
 
 COLOMBIA_TZ = ZoneInfo("America/Bogota")
-
-
-# ---------------------------------------------------------------------------
-# _wants_to_reschedule
-# ---------------------------------------------------------------------------
-
-class TestWantsToReschedule:
-    def test_reschedule_keyword(self):
-        assert _wants_to_reschedule("Quiero reagendar mi cita") is True
-
-    def test_cambiar_keyword(self):
-        assert _wants_to_reschedule("Puedo cambiar la cita?") is True
-
-    def test_cancelar_keyword(self):
-        assert _wants_to_reschedule("Necesito cancelar") is True
-
-    def test_mover_cita(self):
-        assert _wants_to_reschedule("Puedo mover la cita a otro día?") is True
-
-    def test_aplazar(self):
-        assert _wants_to_reschedule("Me toca aplazar") is True
-
-    def test_no_reschedule(self):
-        assert _wants_to_reschedule("Hola, ¿cómo estás?") is False
-
-    def test_case_insensitive(self):
-        assert _wants_to_reschedule("QUIERO REAGENDAR") is True
-
-
-# ---------------------------------------------------------------------------
-# _is_reminder_confirmation
-# ---------------------------------------------------------------------------
-
-class TestIsReminderConfirmation:
-    def test_si_with_accent(self):
-        assert _is_reminder_confirmation("Sí") is True
-
-    def test_si_without_accent(self):
-        assert _is_reminder_confirmation("Si") is True
-
-    def test_confirmo(self):
-        assert _is_reminder_confirmation("Confirmo") is True
-
-    def test_dale(self):
-        assert _is_reminder_confirmation("Dale") is True
-
-    def test_listo(self):
-        assert _is_reminder_confirmation("Listo") is True
-
-    def test_ok(self):
-        assert _is_reminder_confirmation("ok") is True
-
-    def test_claro_que_si(self):
-        assert _is_reminder_confirmation("Claro que sí") is True
-
-    def test_ahi_estare(self):
-        assert _is_reminder_confirmation("Ahí estaré") is True
-
-    def test_not_confirmation(self):
-        assert _is_reminder_confirmation("¿Qué hora es?") is False
-
-    def test_word_boundary_si_in_asistir(self):
-        """'si' should NOT match inside 'asistir' — word boundary check."""
-        # This tests the regex word boundary
-        result = _is_reminder_confirmation("asistir")
-        # "asisto" IS a confirm keyword, but "asistir" is not in the list
-        # "si" should not partial-match inside "asistir" due to word boundary
-        # However, Python \b with Unicode... let's just test what the code does
-        # The key point: "asisto" should match, "asistir" should not match on "si"
-        assert _is_reminder_confirmation("asisto") is True
-
-    def test_perfecto(self):
-        assert _is_reminder_confirmation("Perfecto") is True
-
-    def test_por_supuesto(self):
-        assert _is_reminder_confirmation("Por supuesto") is True
-
-    def test_va(self):
-        assert _is_reminder_confirmation("Va") is True
-
-
-# ---------------------------------------------------------------------------
-# _is_reminder_rejection
-# ---------------------------------------------------------------------------
-
-class TestIsReminderRejection:
-    def test_no_puedo(self):
-        assert _is_reminder_rejection("No puedo ir") is True
-
-    def test_no_voy_a_poder(self):
-        assert _is_reminder_rejection("No voy a poder asistir mañana") is True
-
-    def test_me_queda_dificil(self):
-        assert _is_reminder_rejection("Me queda difícil a esa hora") is True
-
-    def test_se_me_cruzo(self):
-        assert _is_reminder_rejection("Se me cruzó algo") is True
-
-    def test_not_rejection(self):
-        assert _is_reminder_rejection("Dale, ahí estaré") is False
-
-    def test_no_puedo_asistir(self):
-        assert _is_reminder_rejection("No puedo asistir ese día") is True
-
-    def test_me_es_imposible(self):
-        assert _is_reminder_rejection("Me es imposible") is True
-
-    def test_claro_que_no(self):
-        assert _is_reminder_rejection("Claro que no") is True
-
-    def test_ya_no(self):
-        assert _is_reminder_rejection("Ya no") is True
-
-    def test_no_va(self):
-        assert _is_reminder_rejection("No va a ser posible") is True
-
-    def test_ok_no(self):
-        assert _is_reminder_rejection("Ok no, no puedo") is True
-
-
-# ---------------------------------------------------------------------------
-# _wants_to_cancel_only
-# ---------------------------------------------------------------------------
-
-class TestWantsToCancelOnly:
-    def test_cancel_only(self):
-        assert _wants_to_cancel_only("Quiero cancelar mi cita") is True
-
-    def test_ya_no_voy(self):
-        assert _wants_to_cancel_only("Ya no voy a la cita") is True
-
-    def test_cancel_with_reschedule(self):
-        """If user mentions cancelling AND rescheduling, it's a reschedule not pure cancel."""
-        assert _wants_to_cancel_only("Quiero cancelar y reagendar") is False
-
-    def test_not_cancel(self):
-        assert _wants_to_cancel_only("Hola, ¿cómo estás?") is False
 
 
 # ---------------------------------------------------------------------------

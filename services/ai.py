@@ -359,6 +359,156 @@ Responde SOLO con JSON: {{"choice": "whatsapp"}} o {{"choice": "meet"}} o {{"cho
         return None
 
 
+async def classify_appointment_change(user_message: str, conversation_context: str = "") -> dict:
+    """After the appointment was confirmed, classify what the user is asking for.
+
+    Returns:
+        {
+            "action": "cancel" | "reschedule" | "none",
+            "needs_outside_business_hours": bool
+        }
+
+    - "cancel": wants to cancel definitively and does NOT mention an alternative time.
+    - "reschedule": wants to change the time / cannot attend / asks for another slot.
+    - "none": message is unrelated (small talk, a question, a thank-you, etc.).
+    - needs_outside_business_hours=true only if the alternative they propose is
+      after 5 p.m. on a weekday, on a weekend, or any hour outside 9am-5pm Mon-Fri.
+    """
+    context_block = f"\nConversación reciente:\n{conversation_context}\n" if conversation_context else ""
+    prompt = f"""Eres asistente de una clínica estética en Bello, Antioquia.
+Horario de atención: lunes a viernes 9 a.m. a 5 p.m. Todas las citas son presenciales.
+
+La clienta YA tenía una cita agendada y acaba de enviar este mensaje:
+"{user_message}"
+{context_block}
+
+Clasifica su intención:
+
+- "cancel": quiere cancelar la cita y NO menciona otro horario ni intención de cambiarla a otro momento. Ejemplos: "cancela mi cita", "ya no puedo ir", "no voy a asistir", "no me interesa".
+- "reschedule": quiere cambiar la cita a otro horario. Incluye frases como "no puedo a esa hora, mejor mañana", "tengo que cambiarla", "otro día mejor", "puedo después de las 3", "me quedó difícil ese día, ¿el jueves?". También si expresa rechazo del horario actual mencionando preferencia por otro momento.
+- "none": mensaje que no es ni cancelación ni cambio de cita. Saludos, preguntas sobre el tratamiento, agradecimientos, dudas de ubicación, etc.
+
+Además, decide si el NUEVO horario que propone cae FUERA de lunes-viernes 9-5:
+- needs_outside_business_hours = true si pide: después de 5pm, noche, madrugada, sábado, domingo, festivo.
+- needs_outside_business_hours = false si pide dentro de 9-5 L-V (ej: "mañana 10 a.m.", "a las 3 pm", "el jueves en la mañana").
+- needs_outside_business_hours = false si action != "reschedule" (no aplica).
+
+Responde SOLO con JSON:
+{{"action": "cancel" | "reschedule" | "none", "needs_outside_business_hours": true | false}}"""
+
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=60,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        if not raw:
+            return {"action": "none", "needs_outside_business_hours": False}
+        result = json.loads(raw.strip())
+        action = result.get("action", "none")
+        if action not in ("cancel", "reschedule", "none"):
+            action = "none"
+        needs = bool(result.get("needs_outside_business_hours", False))
+        logger.info(f"classify_appointment_change: '{user_message[:60]}' → action={action}, outside_hrs={needs}")
+        return {"action": action, "needs_outside_business_hours": needs}
+    except Exception as e:
+        logger.error(f"classify_appointment_change error: {e}")
+        return {"action": "none", "needs_outside_business_hours": False}
+
+
+async def classify_reminder_response(user_message: str, conversation_context: str = "") -> dict:
+    """After a day-before reminder, classify the patient's response.
+
+    Returns:
+        {
+            "decision": "confirm" | "reject" | "ambiguous",
+            "has_new_time_hint": bool
+        }
+
+    - "confirm": confirms attendance ("sí", "ahí estaré", "listo", "va", "confirmo", "sí señora").
+    - "reject": rejects / cannot attend ("no puedo", "ya no voy", "no me queda", "se me cruzó").
+    - "ambiguous": unclear ("mmm", a question, off-topic).
+    - has_new_time_hint: true only if the rejection also proposes or implies an alternative
+      day/time ("no puedo a esa hora, mejor mañana", "en la tarde mejor"). False otherwise.
+    """
+    context_block = f"\nConversación reciente:\n{conversation_context}\n" if conversation_context else ""
+    prompt = f"""El bot acaba de pedir confirmación de asistencia a una cita agendada.
+La clienta respondió: "{user_message}"
+{context_block}
+
+Clasifica:
+- "confirm": confirma que asistirá. Incluye: "sí", "sí señora", "confirmo", "confirmado", "ahí estaré", "listo", "dale", "perfecto", "va", "ok", "por supuesto", "claro que sí", "cuenten conmigo".
+- "reject": cancela / no podrá asistir / quiere cambiar. Incluye: "no puedo", "ya no voy", "no me queda", "se me cruzó", "a esa hora no", "me es imposible", "no voy a poder", "claro que no", "ya no", "no va".
+- "ambiguous": respuesta poco clara, pregunta, off-topic, o un saludo.
+
+Si es "reject", decide si menciona o sugiere UN NUEVO horario/día:
+- has_new_time_hint = true si dice cosas como "mejor mañana", "después de las 3", "otro día", "el jueves", "en la tarde".
+- has_new_time_hint = false si solo rechaza sin proponer alternativa ("no puedo", "cancela").
+- has_new_time_hint = false si decision != "reject".
+
+Responde SOLO con JSON:
+{{"decision": "confirm" | "reject" | "ambiguous", "has_new_time_hint": true | false}}"""
+
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=60,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        if not raw:
+            return {"decision": "ambiguous", "has_new_time_hint": False}
+        result = json.loads(raw.strip())
+        decision = result.get("decision", "ambiguous")
+        if decision not in ("confirm", "reject", "ambiguous"):
+            decision = "ambiguous"
+        hint = bool(result.get("has_new_time_hint", False))
+        logger.info(f"classify_reminder_response: '{user_message[:60]}' → decision={decision}, hint={hint}")
+        return {"decision": decision, "has_new_time_hint": hint}
+    except Exception as e:
+        logger.error(f"classify_reminder_response error: {e}")
+        return {"decision": "ambiguous", "has_new_time_hint": False}
+
+
+async def requires_outside_business_hours(user_message: str) -> bool:
+    """Return True if the message expresses a preference for a slot outside
+    Mon-Fri 9am-5pm (evenings, nights, weekends)."""
+    prompt = f"""Horario de atención: lunes a viernes, 9 a.m. a 5 p.m.
+
+Mensaje de la clienta: "{user_message}"
+
+¿La clienta está pidiendo o prefiriendo un horario FUERA de ese rango? Incluye:
+- Tardes/noches después de 5 p.m. ("después de las 5", "a las 7 pm", "en la noche", "horario nocturno")
+- Fines de semana ("sábado", "domingo", "fin de semana")
+- Antes de 9 a.m. ("muy temprano", "6 a.m.")
+
+Si la clienta pide un horario dentro de 9-5 L-V (ej: "mañana a las 10", "a las 3 pm"), responde false.
+Si no está hablando de horario, responde false.
+
+Responde SOLO con JSON: {{"outside": true | false}}"""
+    try:
+        response = await get_client().chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.0,
+            max_tokens=30,
+            response_format={"type": "json_object"},
+        )
+        raw = response.choices[0].message.content
+        if not raw:
+            return False
+        result = json.loads(raw.strip())
+        return bool(result.get("outside", False))
+    except Exception as e:
+        logger.error(f"requires_outside_business_hours error: {e}")
+        return False
+
+
 async def extract_user_data(messages: list[dict]) -> dict:
     """Extract structured user data (name, phone, email) from recent conversation messages."""
     recent = messages[-10:] if len(messages) > 10 else messages

@@ -13,9 +13,6 @@ os.environ.setdefault("OPENAI_API_KEY", "sk-test-fake-key-for-tests")
 
 from bot.conversation import ConversationState
 from bot.flow import (
-    _wants_to_reschedule,
-    _is_reminder_confirmation,
-    _is_reminder_rejection,
     _ensure_conversation_alive,
     _format_time_spanish,
     _format_appointment_datetime,
@@ -237,59 +234,9 @@ class TestGroupSlotsEdgeCases:
 
 
 # ---------------------------------------------------------------------------
-# Evening keyword detection during slot selection
-# ---------------------------------------------------------------------------
-
-class TestEveningKeywords:
-    """Test the evening keywords used in _try_parse_slot_selection."""
-
-    _EVENING_KEYWORDS = [
-        "después de las 5", "despues de las 5", "después de las 6", "despues de las 6",
-        "después de las 7", "despues de las 7",
-        "en la noche", "por la noche", "de noche",
-        "a las 6", "a las 7", "a las 8", "a las 9",
-        "6pm", "7pm", "8pm", "9pm", "6 pm", "7 pm", "8 pm", "9 pm",
-        "6 p.m", "7 p.m", "8 p.m", "9 p.m",
-        "fin de semana", "sábado", "sabado", "domingo",
-        "solo puedo en la noche", "horario nocturno",
-        "puedo después de las 5", "puedo despues de las 5",
-        "solo después de las 5", "solo despues de las 5",
-        "solo en la noche", "a partir de las 5", "a partir de las 6",
-        "de 5 en adelante", "de 6 en adelante",
-    ]
-
-    def _is_evening(self, text: str) -> bool:
-        text_lower = text.lower()
-        return any(kw in text_lower for kw in self._EVENING_KEYWORDS)
-
-    def test_after_5pm(self):
-        assert self._is_evening("Solo puedo después de las 5")
-
-    def test_saturday(self):
-        assert self._is_evening("El sábado me queda mejor")
-
-    def test_sunday(self):
-        assert self._is_evening("El domingo puedo")
-
-    def test_7pm(self):
-        assert self._is_evening("Me sirve a las 7pm")
-
-    def test_fin_de_semana(self):
-        assert self._is_evening("Solo fin de semana")
-
-    def test_normal_hours_not_evening(self):
-        assert not self._is_evening("El martes en la mañana")
-
-    def test_3pm_not_evening(self):
-        assert not self._is_evening("A las 3 de la tarde")
-
-    def test_4pm_not_evening(self):
-        """4pm is within business hours (9-5) — should NOT be flagged as evening."""
-        assert not self._is_evening("A las 4 de la tarde")
-
-    def test_despues_de_las_4_not_evening(self):
-        """después de las 4 is within business hours — should NOT trigger."""
-        assert not self._is_evening("Puedo después de las 4")
+# (Evening/weekend keyword tests were removed — detection is now done by
+# services.ai.requires_outside_business_hours via a GPT call with JSON output.
+# See test_booking_flow.py for the async path tests that mock the AI layer.)
 
 
 # ---------------------------------------------------------------------------
@@ -398,51 +345,9 @@ class TestHandleTextPhaseRouting:
 
 
 # ---------------------------------------------------------------------------
-# Reminder edge cases — ambiguous keywords in both lists
-# ---------------------------------------------------------------------------
-
-class TestReminderEdgeCases:
-    def test_claro_que_no_is_rejection(self):
-        """'claro que no' means 'of course not' — must be caught as rejection,
-        not confirmation (even though 'claro' is a confirmation keyword)."""
-        assert _is_reminder_rejection("claro que no") is True
-        # Confirmation still matches 'claro' but rejection is checked first in flow
-        assert _is_reminder_confirmation("claro que no") is True
-
-    def test_ya_no_is_rejection(self):
-        """'ya no' means 'not anymore' — must be caught as rejection,
-        not confirmation (even though 'ya' is a confirmation keyword)."""
-        assert _is_reminder_rejection("ya no") is True
-
-    def test_no_va_is_rejection(self):
-        """'no va' means 'it's not happening' — must be caught as rejection,
-        not confirmation (even though 'va' is a confirmation keyword)."""
-        assert _is_reminder_rejection("no va") is True
-
-    def test_si_pero_no_puedo(self):
-        """'sí pero no puedo' — rejection wins because 'no puedo' is checked first."""
-        assert _is_reminder_rejection("sí pero no puedo") is True
-
-    def test_no_puedo_pero_reagendo(self):
-        """Rejection with time hint should route to reschedule, not cancel."""
-        assert _is_reminder_rejection("no puedo, pero puedo mañana") is True
-
-    def test_empty_string(self):
-        assert _is_reminder_confirmation("") is False
-        assert _is_reminder_rejection("") is False
-
-    def test_just_punctuation(self):
-        assert _is_reminder_confirmation("...") is False
-        assert _is_reminder_rejection("???") is False
-
-    def test_asistire_is_not_false_positive_on_si(self):
-        """'asistiré' contains 'si' but word boundary should prevent false match."""
-        # 'asisto' IS a confirm keyword (and would match), but 'asistiré' is not
-        # The word boundary \bsi\b should not match 'si' inside 'asistiré'
-        # because the 'r' after 'sti' is a word char
-        result = _is_reminder_confirmation("asistiré puntual")
-        # Let's just verify the function doesn't crash and returns something
-        assert isinstance(result, bool)
+# Reminder edge cases removed — reminder classification is now AI-driven
+# (services.ai.classify_reminder_response). Behavior tests with mocks are in
+# test_booking_flow.py::TestHandleReminderResponse.
 
 
 # ---------------------------------------------------------------------------

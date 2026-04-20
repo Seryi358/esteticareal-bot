@@ -371,18 +371,21 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
         await _try_collect_data_and_schedule(conv)
         return
 
-    # Detect rescheduling/cancellation/confirmation when appointment is confirmed
+    # Detect rescheduling/cancellation/confirmation when appointment is confirmed.
+    # Uses AI classification instead of keyword matching — no regex anywhere.
     if conv.phase == "appointment_confirmed":
-        # If reminder was sent and we're awaiting confirmation, handle the response
         if conv.reminder_confirmation_pending and not conv.reminder_confirmed:
             handled = await _handle_reminder_response(conv, text)
             if handled:
                 return
-        if _wants_to_cancel_only(text):
+        classification = await ai.classify_appointment_change(text, _recent_context(conv))
+        action = classification["action"]
+        needs_outside = classification["needs_outside_business_hours"]
+        if action == "cancel":
             await _handle_cancel(conv)
             return
-        if _wants_to_reschedule(text):
-            await _handle_reschedule(conv, text)
+        if action == "reschedule":
+            await _handle_reschedule(conv, text, needs_outside_hours=needs_outside)
             return
 
     # Auto-reset stale escalated_to_yesica phase after 4 hours
@@ -462,34 +465,17 @@ async def _handle_text(conv: ConversationState, text: str) -> None:
 # Rescheduling — user wants to change or cancel an existing appointment
 # ---------------------------------------------------------------------------
 
-_RESCHEDULE_KEYWORDS = [
-    "no puedo", "no me queda", "no me sirve", "cambiar la cita", "cambiar cita",
-    "cambiar el horario", "cambiar horario", "cancelar", "reagendar", "reprogramar",
-    "otro horario", "otra hora", "otro día", "otro dia", "no voy a poder",
-    "me queda difícil", "me queda dificil", "puedo después", "puedo despues",
-    "a esa hora no", "ese día no", "ese dia no", "no me funciona",
-    "mover la cita", "mover cita", "cambiarla", "posponerla", "aplazar",
-]
+async def _handle_reschedule(conv: ConversationState, text: str, needs_outside_hours: bool | None = None) -> None:
+    """Handle rescheduling request — cancel existing appointment and offer new slots.
 
-
-def _wants_to_reschedule(text: str) -> bool:
-    """Detect if user wants to cancel or reschedule their confirmed appointment."""
-    text_lower = text.lower()
-    return any(kw in text_lower for kw in _RESCHEDULE_KEYWORDS)
-
-
-async def _handle_reschedule(conv: ConversationState, text: str) -> None:
-    """Handle rescheduling request — cancel existing appointment and offer new slots."""
+    needs_outside_hours: if the caller already classified the user's intent with
+    AI (e.g. via ai.classify_appointment_change) it can pass the boolean. If
+    None, we classify here.
+    """
     logger.info(f"[{conv.phone}] Rescheduling requested: '{text[:100]}'")
 
-    # Check if user needs evening/weekend (outside business hours)
-    evening_keywords = [
-        "después de las 5", "despues de las 5", "en la noche", "por la noche",
-        "a las 6", "a las 7", "a las 8", "fin de semana", "sábado", "sabado",
-        "domingo", "7pm", "8pm", "6pm", "horario nocturno",
-    ]
-    text_lower = text.lower()
-    needs_evening = any(kw in text_lower for kw in evening_keywords)
+    if needs_outside_hours is None:
+        needs_outside_hours = await ai.requires_outside_business_hours(text)
 
     # Delete old calendar event before resetting state
     if conv.calendar_event_id:
@@ -516,7 +502,7 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
     conv.follow_up_sent = False  # Allow new follow-up after reschedule
     conv.escalated_at = None  # Clear stale escalation timestamp
 
-    if needs_evening:
+    if needs_outside_hours:
         conv.inject_system_event(
             "RESCHEDULE_EVENING: El usuario quiere cambiar su cita y necesita un horario "
             "fuera del rango normal (después de 5pm o fin de semana). "
@@ -557,77 +543,38 @@ async def _handle_reschedule(conv: ConversationState, text: str) -> None:
 # Reminder response handling — patient confirms or rejects after reminder
 # ---------------------------------------------------------------------------
 
-_CONFIRM_KEYWORDS = [
-    "sí", "si", "confirmo", "confirmado", "ahí estaré", "ahi estare",
-    "ahí estaré", "allí estaré", "alli estare", "claro que sí", "claro que si",
-    "listo", "dale", "perfecto", "por supuesto", "va", "ok", "okay",
-    "de acuerdo", "ahí voy", "ahi voy", "cuenten conmigo", "cuenten con migo",
-    "sí señora", "si señora", "sí claro", "si claro", "claro", "ya",
-    "allá estaré", "alla estare", "confirmo asistencia", "asisto",
-]
-
-_REJECT_KEYWORDS = [
-    "no puedo", "no voy a poder", "no me queda", "no me sirve",
-    "no a esa hora", "a esa hora no", "ese día no", "ese dia no",
-    "me queda difícil", "me queda dificil", "no voy",
-    "no podré", "no podre", "me es imposible",
-    "tengo algo", "se me cruzó", "se me cruzo",
-    "no puedo asistir", "no me es posible",
-    # Short confirm keywords ("claro", "ya", "va", "ok") false-positive on these
-    # negative phrases via word-boundary regex — must be caught here first.
-    "claro que no", "ya no", "no va", "ok no",
-]
-
-
-def _is_reminder_confirmation(text: str) -> bool:
-    import re
-    text_lower = text.lower().strip()
-    for kw in _CONFIRM_KEYWORDS:
-        # Use word boundary matching to avoid partial matches (e.g., "si" in "asistir")
-        if re.search(r'\b' + re.escape(kw) + r'\b', text_lower):
-            return True
-    return False
-
-
-def _is_reminder_rejection(text: str) -> bool:
-    text_lower = text.lower().strip()
-    return any(kw in text_lower for kw in _REJECT_KEYWORDS)
+def _recent_context(conv: ConversationState, n: int = 6) -> str:
+    """Build a short conversation context string for AI classifiers."""
+    recent = [m for m in conv.messages[-n:] if m.get("role") in ("user", "assistant")]
+    return "\n".join(
+        f"{'Usuario' if m['role'] == 'user' else 'Bot'}: {m['content']}"
+        for m in recent
+    )
 
 
 async def _handle_reminder_response(conv: ConversationState, text: str) -> bool:
     """Handle patient's response to a day-before confirmation reminder.
-    Returns True if the response was handled, False to fall through to normal flow."""
+    Returns True if the response was handled, False to fall through to normal flow.
 
-    # IMPORTANT: Check rejection FIRST — short confirmation keywords like "ya", "va",
-    # "claro" can false-positive on negative phrases ("ya no voy", "claro que no").
-    # Rejection keywords are more specific ("no puedo", "no voy") so they should
-    # take precedence.
-    if _is_reminder_rejection(text):
-        logger.info(f"[{conv.phone}] Patient rejected appointment after reminder")
+    Classification is done by an AI call — no keyword matching.
+    """
+    classification = await ai.classify_reminder_response(text, _recent_context(conv))
+    decision = classification["decision"]
+    has_time_hint = classification["has_new_time_hint"]
+
+    if decision == "reject":
+        logger.info(f"[{conv.phone}] AI: patient rejected appointment (time_hint={has_time_hint})")
         conv.reminder_confirmation_pending = False
-
-        # Check if they mention a specific new time → reschedule directly
-        time_hints = [
-            "después de las", "despues de las", "a las ", "en la tarde",
-            "en la mañana", "por la mañana", "por la tarde", "mañana",
-            "otro día", "otro dia", "otro horario", "otra hora",
-            "reagendar", "reprogramar", "cambiar",
-        ]
-        text_lower = text.lower()
-        has_time_hint = any(kw in text_lower for kw in time_hints)
-
         if has_time_hint:
             await _handle_reschedule(conv, text)
             return True
-
-        # Pure rejection — cancel and ask if they want to reschedule
         await _handle_cancel(conv, ask_reschedule=True)
         return True
 
-    if _is_reminder_confirmation(text):
+    if decision == "confirm":
         conv.reminder_confirmed = True
         conv.reminder_confirmation_pending = False
-        logger.info(f"[{conv.phone}] Patient confirmed appointment after reminder")
+        logger.info(f"[{conv.phone}] AI: patient confirmed appointment")
 
         formatted_dt = "pendiente"
         if conv.appointment_datetime:
@@ -647,7 +594,6 @@ async def _handle_reminder_response(conv: ConversationState, text: str) -> bool:
         reply = await _generate_reply(conv)
         await _send_and_record(conv, reply)
 
-        # Notify Yésica that patient confirmed
         settings = get_settings()
         name = conv.collected_name or conv.user_display_name or "Cliente"
         try:
@@ -659,38 +605,12 @@ async def _handle_reminder_response(conv: ConversationState, text: str) -> bool:
             logger.error(f"Failed to notify Yésica of confirmation: {e}")
         return True
 
-    # Ambiguous response — let normal flow handle it
-    return False
+    return False  # ambiguous → fall through
 
 
 # ---------------------------------------------------------------------------
 # Pure cancellation — patient wants to cancel without rescheduling
 # ---------------------------------------------------------------------------
-
-_CANCEL_ONLY_KEYWORDS = [
-    "cancelar la cita", "cancelar cita", "cancelo la cita", "cancelo",
-    "quiero cancelar", "deseo cancelar", "necesito cancelar",
-    "ya no puedo ir", "ya no voy", "ya no asisto",
-    "no voy a asistir", "no asistiré", "no asistire",
-]
-
-
-def _wants_to_cancel_only(text: str) -> bool:
-    """Detect if user wants to cancel (not reschedule) their appointment."""
-    text_lower = text.lower()
-    # Must match cancel keywords but NOT contain time preferences
-    has_cancel = any(kw in text_lower for kw in _CANCEL_ONLY_KEYWORDS)
-    if not has_cancel:
-        return False
-    # If they also mention a new time, it's a reschedule not a cancel
-    time_hints = [
-        "otro horario", "otra hora", "otro día", "otro dia",
-        "reagendar", "reprogramar", "mover", "cambiar",
-        "después", "despues", "mañana", "la próxima", "la proxima",
-    ]
-    has_time_hint = any(kw in text_lower for kw in time_hints)
-    return not has_time_hint
-
 
 async def _handle_cancel(conv: ConversationState, ask_reschedule: bool = True) -> None:
     """Cancel appointment: delete calendar event and optionally ask about rescheduling."""
@@ -987,27 +907,15 @@ async def _escalate_to_yesica_evening(conv: ConversationState, user_text: str) -
 _slot_selection_attempts: dict[str, int] = {}
 
 async def _try_parse_slot_selection(conv: ConversationState, text: str) -> None:
-    """User is picking a time slot. GPT parses the selection."""
-    # Check if user needs evening/weekend hours — escalate even during slot selection
-    evening_keywords = [
-        "después de las 5", "despues de las 5", "después de las 6", "despues de las 6",
-        "después de las 7", "despues de las 7",
-        "en la noche", "por la noche", "de noche",
-        "a las 6", "a las 7", "a las 8", "a las 9",
-        "6pm", "7pm", "8pm", "9pm", "6 pm", "7 pm", "8 pm", "9 pm",
-        "6 p.m", "7 p.m", "8 p.m", "9 p.m",
-        "fin de semana", "sábado", "sabado", "domingo",
-        "solo puedo en la noche", "horario nocturno",
-        "puedo después de las 5", "puedo despues de las 5",
-        "solo después de las 5", "solo despues de las 5",
-        "solo en la noche", "a partir de las 5", "a partir de las 6",
-        "de 5 en adelante", "de 6 en adelante",
-    ]
-    text_lower = text.lower()
-    if any(kw in text_lower for kw in evening_keywords):
+    """User is picking a time slot. GPT parses the selection.
+
+    Before parsing, AI checks if the user is requesting a slot outside the
+    9-5 Mon-Fri business hours — if so, escalate to Yésica directly.
+    """
+    if await ai.requires_outside_business_hours(text):
         conv.inject_system_event(
-            "EVENING_ESCALATION: El usuario necesita un horario fuera del rango normal "
-            "(después de 5pm o fin de semana). Dile que lo conectas directamente con "
+            "EVENING_ESCALATION: La clienta necesita un horario fuera del rango normal "
+            "(después de 5pm o fin de semana). Dile que la conectas directamente con "
             "Yésica para coordinar ese horario especial. Sé natural y positiva."
         )
         reply = await _generate_reply(conv)

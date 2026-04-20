@@ -380,78 +380,13 @@ class TestRescheduling:
 # ---------------------------------------------------------------------------
 
 
-class TestRescheduleKeywords:
-    def test_standard_keywords(self):
-        from bot.flow import _wants_to_reschedule
-        assert _wants_to_reschedule("no puedo a esa hora")
-        assert _wants_to_reschedule("Quiero cancelar la cita")
-        assert _wants_to_reschedule("Me queda difícil ese día")
-        assert _wants_to_reschedule("Puedo reagendar?")
-
-    def test_no_reschedule(self):
-        from bot.flow import _wants_to_reschedule
-        assert not _wants_to_reschedule("Gracias, nos vemos!")
-        assert not _wants_to_reschedule("Perfecto")
-        assert not _wants_to_reschedule("Qué tratamientos tienen?")
-
-
-# ---------------------------------------------------------------------------
-# Evening keyword detection — "después de las 4" must NOT escalate
-# ---------------------------------------------------------------------------
-
-
-class TestEveningKeywords:
-    def test_despues_de_las_4_not_evening(self):
-        """4 PM is within business hours — must NOT trigger evening escalation."""
-        # The evening_keywords list in _try_parse_slot_selection should not contain
-        # "después de las 4" since 4 PM < 5 PM (end of business hours)
-        from bot.flow import _try_parse_slot_selection
-        import inspect
-        source = inspect.getsource(_try_parse_slot_selection)
-        assert '"después de las 4"' not in source
-        assert '"despues de las 4"' not in source
-
-    def test_despues_de_las_5_is_evening(self):
-        """5 PM is after business hours — should trigger evening escalation."""
-        from bot.flow import _try_parse_slot_selection
-        import inspect
-        source = inspect.getsource(_try_parse_slot_selection)
-        assert '"después de las 5"' in source
-
-
-# ---------------------------------------------------------------------------
-# Reminder confirmation detection
-# ---------------------------------------------------------------------------
-
-
-class TestReminderConfirmation:
-    def test_confirm_keywords(self):
-        from bot.flow import _is_reminder_confirmation
-        assert _is_reminder_confirmation("Sí, ahí estaré")
-        assert _is_reminder_confirmation("Confirmo")
-        assert _is_reminder_confirmation("Listo")
-        assert _is_reminder_confirmation("Dale")
-        assert _is_reminder_confirmation("Perfecto")
-        assert _is_reminder_confirmation("Ok")
-        assert _is_reminder_confirmation("Claro que sí")
-        assert _is_reminder_confirmation("sí señora")
-
-    def test_reject_keywords(self):
-        from bot.flow import _is_reminder_rejection
-        assert _is_reminder_rejection("No puedo a esa hora")
-        assert _is_reminder_rejection("No voy a poder")
-        assert _is_reminder_rejection("Me queda difícil")
-        assert _is_reminder_rejection("A esa hora no puedo")
-        assert _is_reminder_rejection("No puedo asistir")
-
-    def test_not_confirm_or_reject(self):
-        from bot.flow import _is_reminder_confirmation, _is_reminder_rejection
-        assert not _is_reminder_confirmation("Qué tratamientos tienen?")
-        assert not _is_reminder_rejection("Qué tratamientos tienen?")
+class TestReminderAIClassification:
+    """Intent classification is done by services.ai (GPT call). These tests
+    mock the AI response and verify the flow reacts correctly."""
 
     @pytest.mark.asyncio
-    async def test_reminder_confirmation_sets_flags(self):
-        """Confirming after reminder should set reminder_confirmed=True."""
+    async def test_ai_confirm_sets_flags(self):
+        """AI says 'confirm' → reminder_confirmed flips true."""
         from bot import flow
 
         conv = _make_conv(
@@ -463,6 +398,8 @@ class TestReminderConfirmation:
         )
 
         with (
+            patch("bot.flow.ai.classify_reminder_response", new_callable=AsyncMock,
+                  return_value={"decision": "confirm", "has_new_time_hint": False}),
             patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Perfecto, te esperamos"),
             patch("bot.flow._send_and_record", new_callable=AsyncMock),
             patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
@@ -474,37 +411,8 @@ class TestReminderConfirmation:
         assert conv.reminder_confirmation_pending is False
 
     @pytest.mark.asyncio
-    async def test_negative_with_confirm_keyword_treated_as_rejection(self):
-        """'ya no voy' contains confirm keyword 'ya' but should be REJECTED, not confirmed.
-        Regression test: rejection must be checked before confirmation because short
-        confirm keywords (ya, va, claro) can appear in negative phrases."""
-        from bot import flow
-
-        conv = _make_conv(
-            phase="appointment_confirmed",
-            appointment_datetime=_future_slot().isoformat(),
-            calendar_event_id="evt_regression",
-            reminder_day_before_sent=True,
-            reminder_confirmation_pending=True,
-        )
-
-        with (
-            patch("bot.flow.calendar.delete_event", new_callable=AsyncMock, return_value=True),
-            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Entendido, la cancelo"),
-            patch("bot.flow._send_and_record", new_callable=AsyncMock),
-            patch("bot.flow.evolution.send_text_message", new_callable=AsyncMock),
-        ):
-            handled = await flow._handle_reminder_response(conv, "ya no voy")
-
-        assert handled is True
-        # Must be treated as rejection (cancelled), NOT confirmation
-        assert conv.reminder_confirmed is False
-        assert conv.appointment_cancelled is True
-        assert conv.calendar_event_id is None
-
-    @pytest.mark.asyncio
-    async def test_reminder_rejection_cancels(self):
-        """Rejecting after reminder should cancel the appointment."""
+    async def test_ai_reject_without_hint_cancels(self):
+        """AI says 'reject' with no new time → appointment cancelled."""
         from bot import flow
 
         conv = _make_conv(
@@ -516,6 +424,8 @@ class TestReminderConfirmation:
         )
 
         with (
+            patch("bot.flow.ai.classify_reminder_response", new_callable=AsyncMock,
+                  return_value={"decision": "reject", "has_new_time_hint": False}),
             patch("bot.flow.calendar.delete_event", new_callable=AsyncMock, return_value=True),
             patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="Entendido, la cancelo"),
             patch("bot.flow._send_and_record", new_callable=AsyncMock),
@@ -527,6 +437,47 @@ class TestReminderConfirmation:
         assert conv.appointment_cancelled is True
         assert conv.calendar_event_id is None
 
+    @pytest.mark.asyncio
+    async def test_ai_reject_with_hint_routes_to_reschedule(self):
+        """AI says 'reject' with has_new_time_hint=True → routes to reschedule flow."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_h",
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+        )
+
+        with (
+            patch("bot.flow.ai.classify_reminder_response", new_callable=AsyncMock,
+                  return_value={"decision": "reject", "has_new_time_hint": True}),
+            patch("bot.flow._handle_reschedule", new_callable=AsyncMock) as mock_reschedule,
+        ):
+            handled = await flow._handle_reminder_response(conv, "no puedo, pero puedo mañana")
+
+        assert handled is True
+        mock_reschedule.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ai_ambiguous_falls_through(self):
+        """AI says 'ambiguous' → _handle_reminder_response returns False."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            reminder_day_before_sent=True,
+            reminder_confirmation_pending=True,
+        )
+
+        with patch("bot.flow.ai.classify_reminder_response", new_callable=AsyncMock,
+                   return_value={"decision": "ambiguous", "has_new_time_hint": False}):
+            handled = await flow._handle_reminder_response(conv, "mmm no sé")
+
+        assert handled is False
+
 
 # ---------------------------------------------------------------------------
 # Pure cancellation (cancel-only, no reschedule)
@@ -534,24 +485,70 @@ class TestReminderConfirmation:
 
 
 class TestPureCancellation:
-    def test_cancel_only_keywords(self):
-        from bot.flow import _wants_to_cancel_only
-        assert _wants_to_cancel_only("Quiero cancelar la cita")
-        assert _wants_to_cancel_only("Cancelo la cita")
-        assert _wants_to_cancel_only("Ya no voy a asistir")
+    @pytest.mark.asyncio
+    async def test_ai_cancel_action_triggers_handle_cancel(self):
+        """When AI classifies user's message as 'cancel', _handle_cancel is called."""
+        from bot import flow
 
-    def test_cancel_with_reschedule_intent(self):
-        """If cancel text also mentions rescheduling, it's NOT cancel-only."""
-        from bot.flow import _wants_to_cancel_only
-        assert not _wants_to_cancel_only("Quiero cancelar la cita y reagendar")
-        assert not _wants_to_cancel_only("Cancelo la cita, puedo mañana?")
-        assert not _wants_to_cancel_only("Cancelo, me cambias a otro horario?")
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_cancel",
+        )
 
-    def test_not_cancel(self):
-        from bot.flow import _wants_to_cancel_only
-        assert not _wants_to_cancel_only("Gracias!")
-        assert not _wants_to_cancel_only("Perfecto, nos vemos")
-        assert not _wants_to_cancel_only("No puedo a esa hora")  # reschedule, not cancel-only
+        with (
+            patch("bot.flow.ai.classify_appointment_change", new_callable=AsyncMock,
+                  return_value={"action": "cancel", "needs_outside_business_hours": False}),
+            patch("bot.flow._handle_cancel", new_callable=AsyncMock) as mock_cancel,
+        ):
+            await flow._handle_text(conv, "Quiero cancelar la cita")
+
+        mock_cancel.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_ai_reschedule_action_triggers_handle_reschedule(self):
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+            calendar_event_id="evt_r",
+        )
+
+        with (
+            patch("bot.flow.ai.classify_appointment_change", new_callable=AsyncMock,
+                  return_value={"action": "reschedule", "needs_outside_business_hours": False}),
+            patch("bot.flow._handle_reschedule", new_callable=AsyncMock) as mock_reschedule,
+        ):
+            await flow._handle_text(conv, "no puedo, mejor mañana")
+
+        mock_reschedule.assert_called_once()
+        # needs_outside_hours should be forwarded
+        call_kwargs = mock_reschedule.call_args.kwargs
+        assert call_kwargs.get("needs_outside_hours") is False
+
+    @pytest.mark.asyncio
+    async def test_ai_none_action_lets_normal_flow_run(self):
+        """If AI says action='none', neither cancel nor reschedule fires."""
+        from bot import flow
+
+        conv = _make_conv(
+            phase="appointment_confirmed",
+            appointment_datetime=_future_slot().isoformat(),
+        )
+
+        with (
+            patch("bot.flow.ai.classify_appointment_change", new_callable=AsyncMock,
+                  return_value={"action": "none", "needs_outside_business_hours": False}),
+            patch("bot.flow._handle_cancel", new_callable=AsyncMock) as mock_cancel,
+            patch("bot.flow._handle_reschedule", new_callable=AsyncMock) as mock_reschedule,
+            patch("bot.flow._generate_reply", new_callable=AsyncMock, return_value="hola!"),
+            patch("bot.flow._send_and_record", new_callable=AsyncMock),
+        ):
+            await flow._handle_text(conv, "gracias por todo")
+
+        mock_cancel.assert_not_called()
+        mock_reschedule.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_cancel_deletes_event_and_notifies(self):
